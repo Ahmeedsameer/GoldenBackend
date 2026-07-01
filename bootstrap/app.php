@@ -11,6 +11,11 @@ return Application::configure(basePath: dirname(__DIR__))
         commands: __DIR__.'/../routes/console.php',
         health: '/up',
     )
+    ->withBroadcasting(
+        __DIR__.'/../routes/channels.php',
+        // Auth endpoint at POST /api/broadcasting/auth (no CSRF; JWT resolved via the api guard)
+        ['prefix' => 'api', 'middleware' => ['api']],
+    )
 ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'cors' => \App\Http\Middleware\CorsMiddleware::class,

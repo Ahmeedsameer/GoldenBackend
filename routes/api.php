@@ -17,6 +17,10 @@ use App\Modules\Safe\Controllers\SafeController;
 use App\Modules\Safe\Controllers\SafeManagementController;
 use App\Modules\Safe\Controllers\SafeTypeController;
 use App\Modules\Safe\Controllers\TransactionReasonController;
+use App\Modules\Convention\Controllers\ConventionController;
+use App\Modules\Convention\Controllers\ConventionTransactionController;
+use App\Modules\Convention\Controllers\ManagerConventionController;
+use App\Modules\Convention\Controllers\NotificationController;
 use App\Modules\Sales\Controllers\CashierController;
 use App\Modules\Sales\Controllers\InvoiceController;
 use App\Modules\Sales\Controllers\ManagerOverrideController;
@@ -35,6 +39,20 @@ Route::group(['middleware' => 'api', 'prefix' => 'auth'], function () {
     Route::post('logout',  [AuthController::class, 'logout']);
     Route::post('refresh', [AuthController::class, 'refresh']);
     Route::post('me',      [AuthController::class, 'me']);
+});
+
+
+// ─── Notifications (any authenticated user) ─────────────────────────────────────
+
+Route::group(['middleware' => ['api', CheckRole::class . ':*'], 'prefix' => 'notifications'], function () {
+    Route::get('',              [NotificationController::class, 'index']);
+    Route::get('unread-count',  [NotificationController::class, 'unreadCount']);
+    Route::get('vapid-key',     [NotificationController::class, 'vapidKey']);
+    Route::put('read-all',      [NotificationController::class, 'markAllRead']);
+    Route::post('subscribe',    [NotificationController::class, 'subscribe']);
+    Route::post('unsubscribe',  [NotificationController::class, 'unsubscribe']);
+    Route::post('test',         [NotificationController::class, 'test']);
+    Route::put('{id}/read',     [NotificationController::class, 'markRead']);
 });
 
 
@@ -172,6 +190,24 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::get('supplies',  [AdminStockIntelligenceController::class, 'supplies']);
     });
 
+    // ── Conventions / Cash Advance (عهدة) ──────────────────────────────────────
+    Route::group(['prefix' => 'conventions'], function () {
+
+        // CRUD
+        Route::get('',                [ConventionController::class, 'index']);
+        Route::get('shop/{shopId}',   [ConventionController::class, 'byShop']);
+        Route::post('create',         [ConventionController::class, 'store']);
+        Route::get('show/{id}',       [ConventionController::class, 'show']);
+        Route::put('update/{id}',     [ConventionController::class, 'update']);
+        Route::delete('destroy/{id}', [ConventionController::class, 'destroy']);
+
+        // Transactions
+        Route::get('{id}/transactions',      [ConventionTransactionController::class, 'index']);
+        Route::post('{id}/transactions',     [ConventionTransactionController::class, 'store']);
+        Route::put('transactions/{txId}',    [ConventionTransactionController::class, 'update']);
+        Route::delete('transactions/{txId}', [ConventionTransactionController::class, 'destroy']);
+    });
+
     // ── Safe Operations (admin: any safe) ─────────────────────────────────────
     Route::group(['prefix' => 'safe'], function () {
         Route::get('shops/{shopId}',              [SafeController::class, 'adminShopSafes']);
@@ -194,6 +230,12 @@ Route::group(['middleware' => ['api', CheckRole::class . ':manager'], 'prefix' =
     Route::get('safe/my-shop/{safeId}/transactions',        [SafeController::class, 'managerTransactions']);
     Route::post('safe/my-shop/{safeId}/deposit',            [SafeController::class, 'managerDeposit']);
     Route::post('safe/my-shop/{safeId}/withdraw',           [SafeController::class, 'managerWithdraw']);
+
+    // ── Conventions (own branch only) ─────────────────────────────────────────
+    Route::get('conventions',                   [ManagerConventionController::class, 'index']);
+    Route::get('conventions/{id}',              [ManagerConventionController::class, 'show']);
+    Route::get('conventions/{id}/transactions', [ManagerConventionController::class, 'transactions']);
+    Route::post('conventions/{id}/withdraw',    [ManagerConventionController::class, 'withdraw']);
 
     // ── Read-only lookups ─────────────────────────────────────────────────────
     Route::get('currencies',          [CurrencyController::class, 'index']);
