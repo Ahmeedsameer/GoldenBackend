@@ -7,6 +7,8 @@ use Illuminate\Support\Facades\DB;
 
 class TransferService
 {
+    public function __construct(private InventoryAlertService $alerts) {}
+
     /**
      * نقل كمية من موقع إلى آخر.
      *
@@ -35,7 +37,9 @@ class TransferService
             abort(422, 'لا يمكن النقل من الموقع نفسه إلى نفسه');
         }
 
-        return DB::transaction(function () use ($source, $quantity, $toShopId) {
+        $fromShopId = $source->shop_id;
+
+        $result = DB::transaction(function () use ($source, $quantity, $toShopId) {
             // ── 1. خصم الكمية من المصدر ─────────────────────────────────────
             $source->decrement('current_quantity', $quantity);
             $source->refresh();
@@ -72,5 +76,16 @@ class TransferService
                 ),
             ];
         });
+
+        // Re-evaluate inventory alerts for both ends of the transfer (source may
+        // have dropped below a threshold; destination may have recovered).
+        $productId = (int) ($result['source']->supplyItem->product_id
+            ?? $result['destination']->supplyItem->product_id);
+        if ($productId) {
+            $this->alerts->evaluate($productId, $fromShopId);
+            $this->alerts->evaluate($productId, $toShopId);
+        }
+
+        return $result;
     }
 }

@@ -27,10 +27,8 @@ class ManagerInventoryController extends Controller
             ->with(['supplyItem.product.category']);
 
         if ($search = $request->get('search')) {
-            $query->whereHas('supplyItem.product', fn ($q) =>
-                $q->where('name', 'like', "%{$search}%")
-                  ->orWhere('sku',  'like', "%{$search}%")
-            );
+            // Reuse the single Product::scopeSearch matcher (name / sku / barcode).
+            $query->whereHas('supplyItem.product', fn ($q) => $q->search($search));
         }
 
         $perPage = (int) $request->get('per_page', 30);

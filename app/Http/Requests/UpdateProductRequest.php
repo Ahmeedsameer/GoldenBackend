@@ -25,10 +25,17 @@ class UpdateProductRequest extends FormRequest
             'name' => 'sometimes|required|string|max:255',
             'image' => 'sometimes|nullable|image|mimes:jpeg,png,jpg,gif,svg|max:2048',
             'sku' => 'sometimes|required|string|max:100|unique:products,sku,' . $this->route('id'),
+            'barcode' => 'sometimes|nullable|string|max:100',
             'description' => 'sometimes|nullable|string',
             'is_active' => 'sometimes|in:true,false,1,0',
             'scalar' => 'sometimes|required|in:kg,g,l,ml,pcs',
             'category_id' => 'sometimes|required|exists:categories,id',
+            // Perfume management: per-product price + stock thresholds (all optional)
+            'selling_price'     => 'sometimes|nullable|numeric|min:0',
+            'price_per_gram'    => 'sometimes|nullable|numeric|min:0',
+            'purchase_cost'     => 'sometimes|nullable|numeric|min:0',
+            'warning_quantity'  => 'sometimes|nullable|numeric|min:0',
+            'critical_quantity' => 'sometimes|nullable|numeric|min:0|lte:warning_quantity',
         ];
     }
 

@@ -10,6 +10,7 @@ use App\Http\Controllers\Admin\ShopManagerController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CategoryController;
 use App\Http\Controllers\ProductController;
+use App\Http\Controllers\ProductTypeController;
 use App\Http\Controllers\UsersManagmentController;
 use App\Http\Middleware\CheckRole;
 use App\Modules\Safe\Controllers\CurrencyController;
@@ -68,6 +69,16 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::get('show/{id}',     [UsersManagmentController::class, 'show']);
     });
 
+    // ── Product Types (inventory behavior: Oil, Bottle, Accessory, Packaging) ─
+    Route::get('product-types', [ProductTypeController::class, 'index']);
+
+    // ── Invoice review (pending queue → approve / reject) ────────────────────
+    Route::group(['prefix' => 'admin/invoices'], function () {
+        Route::get('',            [\App\Modules\Sales\Controllers\AdminInvoiceController::class, 'index']);
+        Route::get('{id}',        [\App\Modules\Sales\Controllers\AdminInvoiceController::class, 'show']);
+        Route::put('{id}/status', [\App\Modules\Sales\Controllers\AdminInvoiceController::class, 'updateStatus']);
+    });
+
     // ── Categories ───────────────────────────────────────────────────────────
     Route::group(['prefix' => 'categories'], function () {
         Route::get('list',           [CategoryController::class, 'index']);
@@ -84,6 +95,9 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::get('{id}',    [ProductController::class, 'show']);
         Route::put('{id}',    [ProductController::class, 'update']);
         Route::delete('{id}', [ProductController::class, 'destroy']);
+        // BOM / recipe (components of a composed product)
+        Route::get('{id}/components', [\App\Http\Controllers\ProductComponentController::class, 'index']);
+        Route::put('{id}/components', [\App\Http\Controllers\ProductComponentController::class, 'sync']);
     });
 
     // ── Shops ─────────────────────────────────────────────────────────────────
@@ -263,17 +277,19 @@ Route::group(['middleware' => ['api', CheckRole::class . ':manager'], 'prefix' =
 });
 
 
-// ─── Seller (Cashier) ─────────────────────────────────────────────────────────
+// ─── Seller (Cashier) — managers may sell exactly like sellers ─────────────────
 
-Route::group(['middleware' => ['api', CheckRole::class . ':sales']], function () {
+Route::group(['middleware' => ['api', CheckRole::class . ':sales,manager']], function () {
 
     Route::group(['prefix' => 'sales'], function () {
 
         // ── Cashier utility endpoints (for UI dropdowns / search) ─────────────
         Route::get('goods',       [CashierController::class, 'searchGoods']);
+        Route::get('unstocked-products', [CashierController::class, 'unstockedProducts']);
+        Route::get('composable-products', [CashierController::class, 'composableProducts']);
+        Route::get('products/{id}/components', [CashierController::class, 'productComponents']);
         Route::get('categories',  [CashierController::class, 'getCategories']);
         Route::get('customers',   [CashierController::class, 'searchCustomers']);
-        Route::get('testers',     [CashierController::class, 'searchTesters']);
         Route::get('currencies',  [CashierController::class, 'getCurrencies']);
         Route::get('safes',       [CashierController::class, 'getShopSafes']);
 

@@ -46,6 +46,27 @@ class NotificationService
         return $this->webPush->sendToUsers([$userId], $title, $message, array_merge($data, ['type' => $type]));
     }
 
+    /**
+     * Send the same notification to a set of users (Notification Center +
+     * broadcast + a single batched Web Push). De-duplicates the id list.
+     * Reused by inventory alerts to reach admins + the branch manager at once.
+     *
+     * @return int number of notifications created
+     */
+    public function notify(array $userIds, string $type, string $title, string $message, array $data = []): int
+    {
+        $ids = array_values(array_unique(array_filter($userIds)));
+
+        foreach ($ids as $userId) {
+            $this->persistAndBroadcast((int) $userId, $type, $title, $message, $data);
+        }
+
+        // Standard Web Push (no-op when VAPID not configured)
+        $this->webPush->sendToUsers($ids, $title, $message, array_merge($data, ['type' => $type]));
+
+        return count($ids);
+    }
+
     private function persistAndBroadcast(int $userId, string $type, string $title, string $message, array $data): Notification
     {
         $notification = Notification::create([

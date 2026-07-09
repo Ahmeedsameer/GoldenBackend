@@ -37,6 +37,58 @@ class CashierController extends Controller
     }
 
     /**
+     * Products that have a saved recipe — for the compose modal's recipe search.
+     * GET /api/sales/composable-products?search=عطر
+     */
+    public function composableProducts()
+    {
+        return response()->json([
+            'message' => 'ok',
+            'data'    => $this->salesService->searchComposableProducts(request('search')),
+        ]);
+    }
+
+    /**
+     * A product's recipe (BOM) components, resolved for the seller's shop
+     * (price + unit + available stock) so the compose modal can load them.
+     * GET /api/sales/products/{id}/components
+     */
+    public function productComponents(string $id)
+    {
+        $seller = auth()->user();
+        if (! $seller->shop_id) {
+            return response()->json(['message' => 'البائع غير مرتبط بأي فرع'], 422);
+        }
+
+        return response()->json([
+            'message' => 'ok',
+            'data'    => $this->salesService->resolveProductComponents($seller->shop_id, (int) $id),
+        ]);
+    }
+
+    /**
+     * Catalog products matching the search that are NOT stocked in the seller's
+     * shop. Powers the cashier's "product exists but not in this branch" hint.
+     * GET /api/sales/unstocked-products?search=قهوة
+     */
+    public function unstockedProducts()
+    {
+        $seller = auth()->user();
+        $search = request('search');
+
+        if (! $seller->shop_id) {
+            return response()->json(['message' => 'البائع غير مرتبط بأي فرع'], 422);
+        }
+
+        $products = $this->salesService->searchUnstockedProducts($seller->shop_id, $search);
+
+        return response()->json([
+            'message' => 'ok',
+            'data'    => $products,
+        ]);
+    }
+
+    /**
      * Return all categories (for the lookup panel tabs).
      * GET /api/sales/categories
      */

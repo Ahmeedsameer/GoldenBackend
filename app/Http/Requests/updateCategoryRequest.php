@@ -29,6 +29,10 @@ class updateCategoryRequest extends FormRequest
             'minimum_sell_price' => 'sometimes|required|numeric|min:0',
             'is_fixed'           => 'sometimes|required|boolean',
             'value_percentage'   => 'nullable|numeric|min:0|max:100',
+            'price_per_gram'     => 'nullable|numeric|min:0',
+            'product_type_id'    => 'nullable|exists:product_types,id',
+            'default_warning_quantity'  => 'nullable|numeric|min:0',
+            'default_critical_quantity' => 'nullable|numeric|min:0',
         ];
     }
 

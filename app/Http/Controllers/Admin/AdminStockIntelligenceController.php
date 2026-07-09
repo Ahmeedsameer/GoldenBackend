@@ -35,10 +35,19 @@ class AdminStockIntelligenceController extends Controller
     {
         $threshold = max(1, (int) $request->get('threshold', self::LOW_STOCK_DEFAULT));
 
-        // Aggregate (product × location) totals in one pass
+        // Aggregate (product × location) totals in one pass.
+        // loc_value  = actual batch cost (FIFO);
+        // loc_cost   = product purchase_cost (fallback batch cost);
+        // loc_selling= product selling_price (fallback category minimum).
         $combos = DB::table('goods as g')
             ->join('supply_items as si', 'g.supply_item_id', '=', 'si.id')
-            ->selectRaw('si.product_id, g.shop_id, SUM(g.current_quantity) as loc_qty, SUM(g.current_quantity * si.unit_price) as loc_value')
+            ->join('products as p',       'si.product_id',   '=', 'p.id')
+            ->leftJoin('categories as c', 'p.category_id',   '=', 'c.id')
+            ->selectRaw('si.product_id, g.shop_id,
+                SUM(g.current_quantity) as loc_qty,
+                SUM(g.current_quantity * si.unit_price) as loc_value,
+                SUM(g.current_quantity * COALESCE(p.purchase_cost, si.unit_price)) as loc_cost,
+                SUM(g.current_quantity * COALESCE(p.selling_price, c.minimum_sell_price, 0)) as loc_selling')
             ->groupBy('si.product_id', 'g.shop_id')
             ->get();
 
@@ -68,6 +77,9 @@ class AdminStockIntelligenceController extends Controller
                 'threshold'           => $threshold,
                 'products_with_stock' => $active->pluck('product_id')->unique()->count(),
                 'total_stock_value'   => round((float) $active->sum('loc_value'), 2),
+                'inventory_cost_value'    => round((float) $active->sum('loc_cost'), 2),
+                'inventory_selling_value' => round((float) $active->sum('loc_selling'), 2),
+                'inventory_profit_value'  => round((float) ($active->sum('loc_selling') - $active->sum('loc_cost')), 2),
                 'low_stock_count'     => $active->where('loc_qty', '<=', $threshold)->count(),
                 'out_of_stock_count'  => $depleted->count(),
                 'active_locations'    => $active->pluck('shop_id')->unique()->count(),
@@ -88,6 +100,7 @@ class AdminStockIntelligenceController extends Controller
             ->join('supply_items as si', 'g.supply_item_id', '=', 'si.id')
             ->join('products as p',      'si.product_id',    '=', 'p.id')
             ->leftJoin('categories as c', 'p.category_id',   '=', 'c.id')
+            ->leftJoin('product_types as pt', 'c.product_type_id', '=', 'pt.id')
             ->leftJoin('shops as s',      'g.shop_id',       '=', 's.id')
             ->selectRaw("
                 si.product_id,
@@ -95,14 +108,19 @@ class AdminStockIntelligenceController extends Controller
                 p.sku,
                 p.scalar,
                 COALESCE(c.name, '—') as category_name,
+                COALESCE(pt.name, '—') as product_type_name,
                 g.shop_id,
                 COALESCE(s.name, 'المستودع الرئيسي') as location_name,
                 COUNT(g.id)                               as batch_count,
                 SUM(g.current_quantity)                   as total_qty,
                 AVG(si.unit_price)                        as avg_unit_price,
-                SUM(g.current_quantity * si.unit_price)   as stock_value
+                SUM(g.current_quantity * si.unit_price)   as stock_value,
+                -- Inventory cost value: product purchase_cost, else actual batch cost
+                SUM(g.current_quantity * COALESCE(p.purchase_cost, si.unit_price))         as cost_value,
+                -- Inventory selling value: product selling_price, else category minimum
+                SUM(g.current_quantity * COALESCE(p.selling_price, c.minimum_sell_price, 0)) as selling_value
             ")
-            ->groupBy('si.product_id', 'p.name', 'p.sku', 'p.scalar', 'c.name', 'g.shop_id', 's.name')
+            ->groupBy('si.product_id', 'p.name', 'p.sku', 'p.scalar', 'c.name', 'pt.name', 'g.shop_id', 's.name')
             ->having('total_qty', '>', 0)
             ->orderByDesc('stock_value');
 
@@ -126,12 +144,15 @@ class AdminStockIntelligenceController extends Controller
             'sku'           => $r->sku        ?? '—',
             'scalar'        => $r->scalar     ?? '',
             'category_name' => $r->category_name,
+            'product_type'  => $r->product_type_name,
             'shop_id'       => $r->shop_id,
             'location_name' => $r->location_name,
             'batch_count'   => (int)   $r->batch_count,
             'total_qty'     => round((float) $r->total_qty,       3),
             'avg_unit_price'=> round((float) $r->avg_unit_price,  2),
             'stock_value'   => round((float) $r->stock_value,     2),
+            'cost_value'    => round((float) $r->cost_value,      2),
+            'selling_value' => round((float) $r->selling_value,   2),
         ]);
 
         return response()->json(['message' => 'ok', 'data' => $result]);

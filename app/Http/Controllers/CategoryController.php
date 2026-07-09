@@ -42,7 +42,7 @@ class CategoryController extends Controller
                     break;
             }
         }
-        $categories = $query->with(['parent']);
+        $categories = $query->with(['parent', 'productType']);
         
         if (request('page') < 1) {
             $categories = $categories->get();
@@ -80,7 +80,7 @@ class CategoryController extends Controller
      */
     public function show(string $id)
     {
-        $category = Category::with('parent')->findOrFail($id);
+        $category = Category::with(['parent', 'productType'])->findOrFail($id);
 
         return new CategoryResource($category);
     }

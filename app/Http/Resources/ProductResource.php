@@ -20,7 +20,15 @@ class ProductResource extends JsonResource
             'image' => $this->image ? asset('storage/' . $this->image) : null,
             'description' => $this->description,
             'sku' => $this->sku,
+            'barcode' => $this->barcode,
             'scalar' => $this->scalar,
+            'is_active' => (bool) $this->is_active,
+            'selling_price' => $this->selling_price,
+            'price_per_gram' => $this->price_per_gram,
+            'purchase_cost' => $this->purchase_cost,
+            'profit' => $this->profit,
+            'warning_quantity' => $this->warning_quantity,
+            'critical_quantity' => $this->critical_quantity,
             'category_id' => $this->category_id,
             'category' => $this->whenLoaded('category', function () {
                 return new CategoryResource($this->category);

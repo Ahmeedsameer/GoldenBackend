@@ -59,16 +59,56 @@ class ReportsController extends Controller
             ->where('status', 'pending')
             ->count();
 
+        // Payment-method breakdown (Cash vs Visa …) for approved invoices in the
+        // period. Amounts are converted to EGP via each currency's rate so the
+        // totals are directly comparable.
+        $paymentMethods = $this->paymentMethodBreakdown($shopId, $from, $to);
+
         return response()->json([
             'message' => 'ok',
             'data'    => [
-                'period'        => ['from' => $from, 'to' => $to],
-                'invoice_count' => (int)   ($summary->invoice_count ?? 0),
-                'total_revenue' => round((float) ($summary->total_revenue ?? 0), 2),
-                'avg_invoice'   => round((float) ($summary->avg_invoice   ?? 0), 2),
-                'pending_count' => $pendingCount,
+                'period'          => ['from' => $from, 'to' => $to],
+                'invoice_count'   => (int)   ($summary->invoice_count ?? 0),
+                'total_revenue'   => round((float) ($summary->total_revenue ?? 0), 2),
+                'avg_invoice'     => round((float) ($summary->avg_invoice   ?? 0), 2),
+                'pending_count'   => $pendingCount,
+                'payment_methods' => $paymentMethods,
             ],
         ]);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Cash vs Visa (…) totals for approved invoices in the shop/period.
+    // Returns one row per method: { method, label, amount_egp, payment_count }.
+    // ────────────────────────────────────────────────────────────────
+    private function paymentMethodBreakdown(int $shopId, string $from, string $to): array
+    {
+        $rows = \App\Models\InvoicePayment::query()
+            ->join('invoices',   'invoice_payments.invoice_id',  '=', 'invoices.id')
+            ->join('currencies', 'invoice_payments.currency_id', '=', 'currencies.id')
+            ->where('invoices.shop_id', $shopId)
+            ->where('invoices.status',  'approved')
+            ->whereBetween('invoices.date', [$from, $to])
+            ->selectRaw('
+                invoice_payments.payment_method                                        as method,
+                COUNT(*)                                                                as payment_count,
+                COALESCE(SUM(invoice_payments.amount * currencies.rate), 0)             as amount_egp
+            ')
+            ->groupBy('invoice_payments.payment_method')
+            ->get()
+            ->keyBy('method');
+
+        // Always return every supported method (0 when none), so the UI can
+        // render a stable set of cards.
+        return array_map(function (string $method) use ($rows) {
+            $row = $rows->get($method);
+            return [
+                'method'        => $method,
+                'label'         => \App\Modules\Sales\Enums\PaymentMethod::from($method)->label(),
+                'amount_egp'    => round((float) ($row->amount_egp    ?? 0), 2),
+                'payment_count' => (int)   ($row->payment_count ?? 0),
+            ];
+        }, \App\Modules\Sales\Enums\PaymentMethod::values());
     }
 
     // ────────────────────────────────────────────────────────────────

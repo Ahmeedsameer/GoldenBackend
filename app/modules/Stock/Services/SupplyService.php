@@ -10,6 +10,8 @@ use Illuminate\Support\Facades\DB;
 
 class SupplyService
 {
+    public function __construct(private InventoryAlertService $alerts) {}
+
     public function getAll(array $filters = [], int $perPage = 15): LengthAwarePaginator
     {
         $query = Supply::query()
@@ -49,7 +51,7 @@ class SupplyService
      */
     public function create(array $data): Supply
     {
-        return DB::transaction(function () use ($data) {
+        $supply = DB::transaction(function () use ($data) {
             // 1. إنشاء سجل التوريد
             $supply = Supply::create([
                 'supplier_id'    => $data['supplier_id'],
@@ -77,6 +79,14 @@ class SupplyService
 
             return $supply->load(['supplier:id,name,phone', 'items.product:id,name,scalar']);
         });
+
+        // Supplies land in the main warehouse (shop_id = null) — refresh alert
+        // state for each supplied product so a resolved shortage clears.
+        foreach (array_unique(array_column($data['items'], 'product_id')) as $pid) {
+            $this->alerts->evaluate((int) $pid, null);
+        }
+
+        return $supply;
     }
 
     /**

@@ -40,10 +40,10 @@ class InvoiceController extends Controller
         $invoice = Invoice::with([
             'customer',
             'seller:id,name',
-            'tester:id,name',
             'shop:id,name',
             'items.product:id,name,sku,scalar',
             'items.goods',
+            'payments.currency:id,code,symbol',
         ])->where('seller_id', auth()->id())->findOrFail($id);
 
         return response()->json([

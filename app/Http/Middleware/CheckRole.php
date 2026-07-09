@@ -13,13 +13,20 @@ class CheckRole
      *
      * @param  \Closure(\Illuminate\Http\Request): (\Symfony\Component\HttpFoundation\Response)  $next
      */
-    public function handle(Request $request, Closure $next,string $role): Response
+    public function handle(Request $request, Closure $next, string ...$roles): Response
     {
-        if ($role == 'guest' && auth()->guest()) {
+        // Wildcard: any authenticated user may pass.
+        if (in_array('*', $roles, true) && auth()->check()) {
             return $next($request);
         }
-        
-        if (auth()->check() && (auth()->user()->role == $role || $role == '*')) {
+
+        // Guest routes: only pass when there is no authenticated user.
+        if (in_array('guest', $roles, true) && auth()->guest()) {
+            return $next($request);
+        }
+
+        // Otherwise the user's role must be one of the allowed roles.
+        if (auth()->check() && in_array(auth()->user()->role, $roles, true)) {
             return $next($request);
         }
 

@@ -27,17 +27,29 @@ class ProductController extends Controller
 
     public function index()
     {
-        
         $query = Product::query();
 
-        if($name = request('name')) {
-            $query->where('name', 'like', "%$name%");
+        // Accept the modern `search` param (used by the Supply screen and others)
+        // and the legacy `name` param. Search matches product name, SKU or
+        // barcode so any eligible product is findable regardless of what the
+        // user types. There are no hidden filters (no is_active / soft-delete /
+        // type gating) — every product is searchable unless `active_only` is set.
+        // Single reusable matcher (name / sku / barcode, case-insensitive, partial).
+        $query->search(request('search', request('name')));
+
+        if (request()->boolean('active_only')) {
+            $query->where('is_active', true);
         }
 
-        $limit = request('limit', 30);
+        // Support both `per_page` (modern) and `limit` (legacy). Capped at 100
+        // so a single response stays small; clients paginate for more.
+        $perPage = max(1, min((int) request('per_page', request('limit', 30)), 100));
 
-        $products = $query->with('category')->paginate($limit);
-        
+        // Newest first so a just-created product is immediately at the top.
+        $products = $query->with('category.productType')
+            ->orderByDesc('id')
+            ->paginate($perPage);
+
         return ProductResource::collection($products);
     }
 
@@ -64,7 +76,7 @@ class ProductController extends Controller
      */
     public function show(string $id)
     {
-        $product = Product::with('category')->findOrFail($id);
+        $product = Product::with('category.productType')->findOrFail($id);
 
         return new ProductResource($product);
     }

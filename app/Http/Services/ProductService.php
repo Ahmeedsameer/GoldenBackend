@@ -5,6 +5,7 @@ namespace App\Http\Services;
 
 use App\Http\Requests\CreateProductRequest;
 use App\Http\Requests\UpdateProductRequest;
+use App\Models\Category;
 use App\Models\Product;
 use Log;
 
@@ -19,9 +20,86 @@ class ProductService{
         }
         $data['image'] = $imagePath;
         $data['is_active'] = ($data['is_active'] === 'true' || $data['is_active'] === '1') ? true : false;
+
+        // SKU is auto-generated when the admin doesn't provide one — products are
+        // found by barcode + name, so no manual SKU entry is required.
+        if (empty($data['sku'])) {
+            $data['sku'] = $this->generateUniqueSku();
+        }
+
+        // Inherit stock thresholds from the selected category's defaults when the
+        // admin did not set them explicitly (still overridable per product later).
+        $this->applyCategoryThresholdDefaults($data);
+
+        // Enforce Product-Type-driven rules (unit from type; oil price on category).
+        $this->applyProductTypeRules($data);
+
         $product = Product::create($data);
 
         return $product;
+    }
+
+    /**
+     * Behavior is driven by the Product Type (never by category name):
+     *  - the inventory unit is taken from the type's default_unit
+     *    (oil → g, bottle/accessory/packaging → pcs);
+     *  - for oil (pricing_source = category) the selling price lives on the
+     *    category, so any per-product selling_price is cleared.
+     */
+    private function applyProductTypeRules(array &$data): void
+    {
+        if (empty($data['category_id'])) {
+            return;
+        }
+        $category = Category::with('productType')->find($data['category_id']);
+        $type = $category?->productType;
+        if (! $type) {
+            return;
+        }
+
+        if ($type->default_unit) {
+            $data['scalar'] = $type->default_unit;
+        }
+
+        if ($type->pricing_source === 'category') {
+            $data['selling_price'] = null; // oil price comes from the category
+        }
+    }
+
+    /** Generate a unique auto SKU (e.g. PRD-3F9A2B7C). */
+    private function generateUniqueSku(): string
+    {
+        do {
+            $sku = 'PRD-' . strtoupper(bin2hex(random_bytes(4)));
+        } while (Product::where('sku', $sku)->exists());
+
+        return $sku;
+    }
+
+    /**
+     * Fill missing per-product warning/critical thresholds from the category's
+     * default_* values (if configured). Explicit product values always win.
+     */
+    private function applyCategoryThresholdDefaults(array &$data): void
+    {
+        if (empty($data['category_id'])) {
+            return;
+        }
+        if (isset($data['warning_quantity']) && isset($data['critical_quantity'])) {
+            return;
+        }
+
+        $category = Category::find($data['category_id']);
+        if (! $category) {
+            return;
+        }
+
+        if (! isset($data['warning_quantity']) && $category->default_warning_quantity !== null) {
+            $data['warning_quantity'] = $category->default_warning_quantity;
+        }
+        if (! isset($data['critical_quantity']) && $category->default_critical_quantity !== null) {
+            $data['critical_quantity'] = $category->default_critical_quantity;
+        }
     }
 
 
@@ -43,6 +121,11 @@ class ProductService{
                 $data['image'] = $imagePath;
             }
             $data['is_active'] = ($data['is_active'] === 'true' || $data['is_active'] === '1') ? true : false;
+
+            // Keep Product-Type-driven rules consistent on update too. Uses the
+            // incoming category_id when changed, else the product's current one.
+            $data['category_id'] = $data['category_id'] ?? $product->category_id;
+            $this->applyProductTypeRules($data);
 
             $product->update($data);
             Log::info('Product updated successfully', ['product_id' => $product->id, 'updated_data' => $data]);

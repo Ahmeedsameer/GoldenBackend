@@ -3,7 +3,9 @@
 namespace App\Modules\Sales\Requests;
 
 use App\Models\Safe;
+use App\Modules\Sales\Enums\PaymentMethod;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class StoreInvoiceRequest extends FormRequest
 {
@@ -27,20 +29,39 @@ class StoreInvoiceRequest extends FormRequest
         return [
             'name'               => [ 'nullable','string', 'max:255'],
             'phone'              => [ 'nullable','string', 'max:20'],
-            'tester_id'          => ['nullable', 'exists:users,id'],
             'date'               => ['required', 'date'],
             'price_type'         => ['required', 'in:wholesale,retail'],
             'safe_id'            => ['nullable', 'integer', 'exists:safes,id'],
+
+            // Pricing engine selector: 'auto' (per-item when configured, else
+            // legacy) or 'global' (force the legacy Global-Total workflow).
+            'pricing_mode'       => ['nullable', 'in:auto,global'],
 
             // Payment breakdown — required for physical safes
             'payments'               => [$isPhysical ? 'required' : 'nullable', 'array', 'min:1'],
             'payments.*.currency_id' => ['required_with:payments', 'integer', 'exists:currencies,id'],
             'payments.*.amount'      => ['required_with:payments', 'numeric', 'min:0.01'],
 
+            // Payment method — one of the supported methods (cash, visa, …)
+            'payments.*.payment_method' => ['required_with:payments', Rule::in(PaymentMethod::values())],
+
+            // Transaction/reference number — required only for methods that need
+            // it (e.g. Visa). Rejected as a duplicate if the same reference was
+            // already used on any previous payment.
+            'payments.*.transaction_number' => [
+                'nullable',
+                'required_if:payments.*.payment_method,' . implode(',', PaymentMethod::requiresTransactionNumber()),
+                'string',
+                'max:100',
+                Rule::unique('invoice_payments', 'transaction_number'),
+            ],
+
             'total_amount'       => ['required', 'numeric', 'min:0.01'],
             'items'              => ['required', 'array', 'min:1'],
             'items.*.product_id' => ['required', 'integer', 'exists:products,id'],
             'items.*.quantity'   => ['required', 'numeric', 'min:0.001'],
+            // Manual per-line unit price (cashier can override the configured price).
+            'items.*.price'      => ['nullable', 'numeric', 'min:0'],
 
             // Cache-based override token — set when manager has approved the request
             'override_token'     => ['nullable', 'string', 'uuid'],
@@ -54,7 +75,6 @@ class StoreInvoiceRequest extends FormRequest
             'name.max'                        => 'اسم العميل طويل جداً',
           
             'phone.max'                       => 'رقم الهاتف طويل جداً',
-            'tester_id.exists'                => 'المراجع المحدد غير موجود في النظام',
             'date.required'                   => 'تاريخ الفاتورة مطلوب',
             'date.date'                       => 'صيغة التاريخ غير صحيحة',
             'price_type.required'             => 'نوع السعر مطلوب',
@@ -67,6 +87,11 @@ class StoreInvoiceRequest extends FormRequest
             'payments.*.currency_id.exists'   => 'العملة المحددة غير موجودة في النظام',
             'payments.*.amount.required_with' => 'المبلغ مطلوب لكل صف دفع',
             'payments.*.amount.min'           => 'يجب أن يكون المبلغ أكبر من صفر',
+            'payments.*.payment_method.required_with' => 'طريقة الدفع مطلوبة لكل صف دفع',
+            'payments.*.payment_method.in'            => 'طريقة الدفع المحددة غير مدعومة',
+            'payments.*.transaction_number.required_if' => 'رقم عملية فيزا مطلوب عند اختيار الدفع بالفيزا',
+            'payments.*.transaction_number.max'         => 'رقم العملية طويل جداً',
+            'payments.*.transaction_number.unique'      => 'رقم العملية مُستخدم من قبل في فاتورة أخرى',
             'items.required'                  => 'يجب إضافة صنف واحد على الأقل في الفاتورة',
             'items.array'                     => 'صيغة الأصناف غير صحيحة',
             'items.min'                       => 'يجب إضافة صنف واحد على الأقل في الفاتورة',

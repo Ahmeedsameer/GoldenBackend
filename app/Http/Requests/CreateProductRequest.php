@@ -24,11 +24,18 @@ class CreateProductRequest extends FormRequest
         return [
             'name' => 'required|string|max:255',
             'image' => 'nullable|image|mimes:jpeg,png,jpg,gif,svg|max:2048',
-            'sku' => 'required|string|max:100|unique:products,sku',
+            'sku' => 'nullable|string|max:100|unique:products,sku',
+            'barcode' => 'nullable|string|max:100',
             'description' => 'nullable|string',
             'is_active' => 'required|in:true,false,1,0',
             'scalar' => 'required|in:kg,g,l,ml,pcs',
             'category_id' => 'required|exists:categories,id',
+            // Perfume management: per-product price + stock thresholds (all optional)
+            'selling_price'     => 'nullable|numeric|min:0',
+            'price_per_gram'    => 'nullable|numeric|min:0',
+            'purchase_cost'     => 'nullable|numeric|min:0',
+            'warning_quantity'  => 'nullable|numeric|min:0',
+            'critical_quantity' => 'nullable|numeric|min:0|lte:warning_quantity',
         ];
     }
 

@@ -11,29 +11,34 @@ use App\Models\InvoicePayment;
 use App\Models\Product;
 use App\Models\Safe;
 use App\Models\User;
+use App\Modules\Sales\Enums\PaymentMethod;
 use App\Modules\Safe\Services\SafeService;
+use App\Modules\Stock\Services\InventoryAlertService;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 class SalesService
 {
-    public function __construct(private SafeService $safeService) {}
+    public function __construct(
+        private SafeService $safeService,
+        private InventoryAlertService $inventoryAlerts,
+    ) {}
     // ── Frontend utility: search available goods in seller's shop ─────────────
 
     public function searchGoods(int $shopId, ?string $search, int $perPage, ?int $categoryId = null): mixed
     {
         $query = Goods::query()
             ->with([
-                'supplyItem.product:id,name,sku,scalar,category_id',
-                'supplyItem.product.category:id,name,minimum_sell_price,is_fixed,value_percentage',
+                'supplyItem.product:id,name,sku,scalar,category_id,selling_price,price_per_gram',
+                'supplyItem.product.category:id,name,minimum_sell_price,price_per_gram,is_fixed,value_percentage,product_type_id',
+                'supplyItem.product.category.productType:id,sold_by,pricing_source,default_unit',
             ])
             ->where('shop_id', $shopId);
 
         if ($search) {
-            $query->whereHas('supplyItem.product', function ($q) use ($search) {
-                $q->where('name', 'like', "%{$search}%")
-                  ->orWhere('sku',  'like', "%{$search}%");
-            });
+            // Reuse the single Product::scopeSearch matcher (name / sku / barcode)
+            // so the cashier search behaves identically to Supply/Transfer.
+            $query->whereHas('supplyItem.product', fn ($q) => $q->search($search));
         }
 
         if ($categoryId) {
@@ -42,7 +47,119 @@ class SalesService
             });
         }
 
-        return $query->paginate($perPage);
+        $goods = $query->paginate($perPage);
+
+        // Attach a per-product shop stock total + a traffic-light stock level so
+        // the cashier can show green/yellow/red and a lightweight "only N left"
+        // warning. Thresholds themselves are NOT exposed (computed server-side),
+        // so sales users never see configured management values (Section #13/#17).
+        $this->decorateWithStockLevel($goods->getCollection(), $shopId);
+
+        return $goods;
+    }
+
+    /** Compute per-product shop stock + level for a collection of Goods rows. */
+    private function decorateWithStockLevel(\Illuminate\Support\Collection $rows, int $shopId): void
+    {
+        $productIds = $rows
+            ->map(fn ($g) => optional(optional($g->supplyItem)->product)->id)
+            ->filter()->unique()->values();
+
+        if ($productIds->isEmpty()) {
+            return;
+        }
+
+        $totals = Goods::query()
+            ->join('supply_items', 'goods.supply_item_id', '=', 'supply_items.id')
+            ->whereIn('supply_items.product_id', $productIds)
+            ->where('goods.shop_id', $shopId)
+            ->groupBy('supply_items.product_id')
+            ->selectRaw('supply_items.product_id as pid, SUM(goods.current_quantity) as total')
+            ->pluck('total', 'pid');
+
+        $thresholds = Product::whereIn('id', $productIds)
+            ->get(['id', 'warning_quantity', 'critical_quantity'])
+            ->keyBy('id');
+
+        foreach ($rows as $g) {
+            $product = optional($g->supplyItem)->product;
+            $pid   = $product->id ?? null;
+            $stock = (float) ($totals[$pid] ?? 0);
+            $g->setAttribute('product_shop_stock', $stock);
+            $g->setAttribute('stock_level', $this->stockLevel($thresholds[$pid] ?? null, $stock));
+
+            // Pricing metadata so the cashier can auto-compute line totals:
+            //   configured_unit_price → oil: category price/gram, non-oil: product
+            //   selling_price (null when unconfigured → cashier uses Global Total).
+            $type = optional($product?->category)->productType;
+            $g->setAttribute('configured_unit_price', $product ? $this->resolveConfiguredUnitPrice($product) : null);
+            $g->setAttribute('sells_by', $type->sold_by ?? 'unit');
+            $g->setAttribute('pricing_source', $type->pricing_source ?? null);
+            // Selling unit is defined by the Product Type (g / pcs), else the product's own scalar.
+            $g->setAttribute('unit', $type->default_unit ?? ($product->scalar ?? ''));
+        }
+    }
+
+    /**
+     * Whether a category prices at a fixed value (bottle-like) vs a weighted
+     * pool (oil-like). Behavior now lives on the Product Type; we fall back to
+     * the category's own legacy is_fixed so nothing breaks for categories that
+     * are not yet linked to a type.
+     */
+    private function categoryIsFixed($category): bool
+    {
+        if (! $category) {
+            return false;
+        }
+        if ($category->productType) {
+            return (bool) $category->productType->is_fixed;
+        }
+        return (bool) $category->is_fixed;
+    }
+
+    /** ok | warning | critical | out — mirrors InventoryAlertService thresholds. */
+    private function stockLevel(?Product $product, float $qty): string
+    {
+        if ($qty <= 0) {
+            return 'out';
+        }
+        $crit = $product?->critical_quantity !== null ? (float) $product->critical_quantity : null;
+        $warn = $product?->warning_quantity  !== null ? (float) $product->warning_quantity  : null;
+
+        if ($crit !== null && $qty <= $crit) {
+            return 'critical';
+        }
+        if ($warn !== null && $qty <= $warn) {
+            return 'warning';
+        }
+        return 'ok';
+    }
+
+    // ── Frontend utility: catalog products matching the search that are NOT ───
+    // stocked in the seller's shop. Used purely to show an informational hint
+    // in the cashier ("product exists but not in this branch's stock — supply/
+    // transfer it first"). It never makes these products sellable.
+    public function searchUnstockedProducts(int $shopId, ?string $search, int $limit = 10): mixed
+    {
+        if (! $search) {
+            return collect();
+        }
+
+        return Product::query()
+            ->where('is_active', true)
+            ->search($search)   // single reusable matcher (name / sku / barcode)
+            // Exclude any product that already has an inventory row in this shop
+            // (those are returned by searchGoods and are sellable).
+            ->whereNotExists(function ($q) use ($shopId) {
+                $q->select(DB::raw(1))
+                  ->from('goods')
+                  ->join('supply_items', 'goods.supply_item_id', '=', 'supply_items.id')
+                  ->whereColumn('supply_items.product_id', 'products.id')
+                  ->where('goods.shop_id', $shopId);
+            })
+            ->orderBy('name')
+            ->limit($limit)
+            ->get(['id', 'name', 'sku', 'scalar']);
     }
 
     // ── Frontend utility: search customers by phone ────────────────────────────
@@ -105,7 +222,7 @@ class SalesService
             }
         }
 
-        return DB::transaction(function () use ($data, $seller, $overrideApproved) {
+        $result = DB::transaction(function () use ($data, $seller, $overrideApproved) {
             // ── 1. Find or create customer by phone ──────────────────────────
             $customer = null;
             if (! empty($data['phone']) || ! empty($data['name'])) {
@@ -117,19 +234,51 @@ class SalesService
 
             // ── 2. Load products with full category data ──────────────────────
             $productIds = array_column($data['items'], 'product_id');
-            $products   = Product::with('category:id,name,minimum_sell_price,is_fixed,value_percentage')
+            $products   = Product::with([
+                    'category:id,name,minimum_sell_price,price_per_gram,is_fixed,value_percentage,product_type_id',
+                    'category.productType:id,is_fixed,sold_by,pricing_source',
+                ])
                 ->whereIn('id', $productIds)
                 ->get()
                 ->keyBy('id');
 
-            // ── 3. Distribute global total → compute unit price per item ──────
-            $items = $this->distributeGlobalTotal(
-                (float) $data['total_amount'],
-                $data['items'],
-                $products
-            );
+            // ── 2b. Stock guard — never sell more than what is in this shop ──
+            // Sum the requested quantity per product (an item may span rows),
+            // then compare against the available shop stock. Out-of-stock and
+            // over-sell are both rejected before any deduction. FIFO untouched.
+            $requestedByProduct = [];
+            foreach ($data['items'] as $item) {
+                $pid = (int) $item['product_id'];
+                $requestedByProduct[$pid] = ($requestedByProduct[$pid] ?? 0) + (float) $item['quantity'];
+            }
 
-            // ── 4. Validate payment total against total_amount (physical safe) ─
+            foreach ($requestedByProduct as $pid => $requested) {
+                $available = (float) Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $pid))
+                    ->where('shop_id', $seller->shop_id)
+                    ->sum('current_quantity');
+
+                $name = $products[$pid]->name ?? "#{$pid}";
+                $unit = $products[$pid]->scalar ?? '';
+
+                if ($available <= 0) {
+                    abort(422, "المنتج \"{$name}\" نفد من المخزون في هذا الفرع ولا يمكن بيعه.");
+                }
+
+                if ($requested > $available) {
+                    $reqTxt = rtrim(rtrim(number_format($requested, 3, '.', ''), '0'), '.');
+                    $availTxt = rtrim(rtrim(number_format($available, 3, '.', ''), '0'), '.');
+                    abort(422, "الكمية المطلوبة من \"{$name}\" ({$reqTxt} {$unit}) أكبر من المتاح في المخزون ({$availTxt} {$unit}). لا يمكن إتمام البيع.");
+                }
+            }
+
+            // ── 3. Price each item ───────────────────────────────────────────
+            // NEW per-item engine when every item is configured (oil → category
+            // price/gram, non-oil → product selling_price); otherwise fall back
+            // to the legacy global-total distribution. $effectiveTotal is the
+            // authoritative invoice total from here on.
+            [$items, $effectiveTotal] = $this->priceInvoiceItems($data, $products);
+
+            // ── 4. Validate payment total against the invoice total (physical safe) ─
             if (! empty($data['payments'])) {
                 $currencyIds      = array_unique(array_column($data['payments'], 'currency_id'));
                 $rates            = Currency::whereIn('id', $currencyIds)->pluck('rate', 'id');
@@ -140,11 +289,11 @@ class SalesService
                     $paymentsEgpTotal += (float) $payment['amount'] * $rate;
                 }
 
-                if ($paymentsEgpTotal < (float) $data['total_amount']) {
+                if ($paymentsEgpTotal < $effectiveTotal) {
                     abort(422, sprintf(
                         'مجموع المبالغ المدفوعة بعد التحويل إلى الجنيه المصري (%.2f ج.م) أقل من إجمالي الفاتورة (%.2f ج.م). يرجى مراجعة المبالغ المُدخلة.',
                         $paymentsEgpTotal,
-                        (float) $data['total_amount']
+                        $effectiveTotal
                     ));
                 }
             }
@@ -156,7 +305,7 @@ class SalesService
                 $category = $product?->category;
 
                 // Fixed-price items are always at the minimum — skip them
-                if ($category && ! $category->is_fixed
+                if ($category && ! $this->categoryIsFixed($category)
                     && (float) $item['price'] < (float) $category->minimum_sell_price) {
                     $violations[] = [
                         'product_id'         => $product->id,
@@ -174,11 +323,10 @@ class SalesService
                 'customer_id'  => $customer?->id,
                 'shop_id'      => $seller->shop_id,
                 'seller_id'    => $seller->id,
-                'tester_id'    => $data['tester_id'] ?? null,
                 'date'         => $data['date'],
                 'price_type'   => $data['price_type'],
                 'status'       => ($violations && ! $overrideApproved) ? 'pending' : 'approved',
-                'total_amount' => (float) $data['total_amount'],
+                'total_amount' => $effectiveTotal,
             ]);
 
             // ── 7. Process each item — FIFO batch splitting + deduction ───────
@@ -207,21 +355,25 @@ class SalesService
             if ($safe->safeType->kind === 'physical' && ! empty($data['payments'])) {
                 foreach ($data['payments'] as $payment) {
                     InvoicePayment::create([
-                        'invoice_id'  => $invoice->id,
-                        'safe_id'     => $safe->id,
-                        'currency_id' => (int) $payment['currency_id'],
-                        'amount'      => (float) $payment['amount'],
+                        'invoice_id'         => $invoice->id,
+                        'safe_id'            => $safe->id,
+                        'currency_id'        => (int) $payment['currency_id'],
+                        'amount'             => (float) $payment['amount'],
+                        'payment_method'     => $payment['payment_method'] ?? PaymentMethod::Cash->value,
+                        'transaction_number' => ! empty($payment['transaction_number'])
+                            ? $payment['transaction_number']
+                            : null,
                     ]);
                     $this->safeService->recordSaleTransaction(
                         $safe, $invoice, (int) $payment['currency_id'], (float) $payment['amount'], $seller->id
                     );
                 }
             } else {
-                // Virtual safe → record the entered total directly in EGP
+                // Virtual safe → record the invoice total directly in EGP
                 $egpCurrencyId = Currency::where('code', 'EGP')->value('id');
                 if ($egpCurrencyId) {
                     $this->safeService->recordSaleTransaction(
-                        $safe, $invoice, (int) $egpCurrencyId, (float) $data['total_amount'], $seller->id
+                        $safe, $invoice, (int) $egpCurrencyId, $effectiveTotal, $seller->id
                     );
                 }
             }
@@ -230,14 +382,33 @@ class SalesService
                 'invoice'    => $invoice->load([
                     'customer',
                     'seller:id,name',
-                    'tester:id,name',
                     'shop:id,name',
                     'items.product:id,name,sku,scalar',
                     'items.goods',
+                    'payments.currency:id,code,symbol',
                 ]),
                 'violations' => $violations,
             ];
         });
+
+        // ── Post-commit side effects (stock is final here) ───────────────────
+        // 1) Re-evaluate inventory level for each sold product → low/critical/out
+        //    notifications to admins + the branch manager (de-duped by state).
+        $soldProductIds = array_unique(array_column($data['items'], 'product_id'));
+        foreach ($soldProductIds as $pid) {
+            $this->inventoryAlerts->evaluate((int) $pid, $seller->shop_id);
+        }
+
+        // 2) Price-violation alert (sold below the category minimum).
+        if (! empty($result['violations'])) {
+            $this->inventoryAlerts->notifyPriceViolation(
+                $seller->shop_id,
+                $result['invoice']->id,
+                $result['violations']
+            );
+        }
+
+        return $result;
     }
 
     // ── Deduct inventory across FIFO batches, split InvoiceItem per batch ─────
@@ -311,6 +482,111 @@ class SalesService
         }
     }
 
+    // ── Coexistence pricing: per-item engine, with legacy fallback ─────────────
+
+    /**
+     * Price the invoice items and return [items(with 'price'), effectiveTotal].
+     *
+     * New engine — used only when EVERY item has a configured price:
+     *   oil  → category.price_per_gram   (Product Type pricing_source = category)
+     *   non-oil → product.selling_price  (Product Type pricing_source = product)
+     *   line total = quantity × unit price; invoice total = Σ line totals.
+     *
+     * Otherwise the legacy global-total distribution runs unchanged, so existing
+     * (unconfigured) data keeps working exactly as before. The category minimum
+     * remains the price floor for both engines (checked in step 5).
+     *
+     * @return array{0: array, 1: float}
+     */
+    private function priceInvoiceItems(array $data, \Illuminate\Support\Collection $products): array
+    {
+        $items = $data['items'];
+
+        // Explicit Global-Total mode: the cashier can always fall back to the
+        // legacy global-total workflow on demand (legacy products / special
+        // cases), even when items happen to be configured.
+        if (($data['pricing_mode'] ?? 'auto') === 'global') {
+            $total = (float) ($data['total_amount'] ?? 0);
+            return [$this->distributeGlobalTotal($total, $items, $products), round($total, 2)];
+        }
+
+        // Manual per-line prices: when the cashier provides a price for every
+        // line, use those directly (no distribution). Total = Σ qty × price.
+        $allHavePrice = collect($items)->every(
+            fn ($it) => isset($it['price']) && $it['price'] !== null && $it['price'] !== '' && (float) $it['price'] >= 0
+        );
+        if ($allHavePrice) {
+            $total = 0.0;
+            foreach ($items as &$item) {
+                $item['price'] = (float) $item['price'];
+                $total        += (float) $item['quantity'] * $item['price'];
+            }
+            unset($item);
+
+            return [$items, round($total, 2)];
+        }
+
+        $allConfigured = true;
+        $configured    = [];
+
+        foreach ($items as $item) {
+            $product = $products[$item['product_id']] ?? null;
+            $price   = $product ? $this->resolveConfiguredUnitPrice($product) : null;
+            $configured[$item['product_id']] = $price;
+            if ($price === null) {
+                $allConfigured = false;
+            }
+        }
+
+        if ($allConfigured) {
+            $total = 0.0;
+            foreach ($items as &$item) {
+                $price          = (float) $configured[$item['product_id']];
+                $item['price']  = $price;
+                $total         += (float) $item['quantity'] * $price;
+            }
+            unset($item);
+
+            return [$items, round($total, 2)];
+        }
+
+        // Legacy fallback — distribute the seller-entered global total.
+        $total = (float) ($data['total_amount'] ?? 0);
+        $items = $this->distributeGlobalTotal($total, $items, $products);
+
+        return [$items, round($total, 2)];
+    }
+
+    /**
+     * The product's configured unit price under the new engine, or null when it
+     * has not been configured yet (→ triggers legacy fallback). Behavior is
+     * driven purely by the Product Type — never by category name.
+     */
+    private function resolveConfiguredUnitPrice(Product $product): ?float
+    {
+        $category = $product->category;
+        $type     = $category?->productType;
+        if (! $type) {
+            return null;
+        }
+
+        if ($type->pricing_source === 'category') {
+            // Oil: price per gram now lives on the product. Falls back to the
+            // (legacy) category price_per_gram so pre-refactor data still sells.
+            if ($product->price_per_gram !== null) {
+                return (float) $product->price_per_gram;
+            }
+            return $category->price_per_gram !== null ? (float) $category->price_per_gram : null;
+        }
+
+        if ($type->pricing_source === 'product') {
+            // Non-oil: selling price lives on the product.
+            return $product->selling_price !== null ? (float) $product->selling_price : null;
+        }
+
+        return null;
+    }
+
     // ── Distribute global total across items (A→B→C→D pipeline) ─────────────
 
     private function distributeGlobalTotal(float $totalAmount, array $items, \Illuminate\Support\Collection $products): array
@@ -319,7 +595,7 @@ class SalesService
         $fixedTotal = 0.0;
         foreach ($items as &$item) {
             $category = $products[$item['product_id']]?->category;
-            if ($category && $category->is_fixed) {
+            if ($category && $this->categoryIsFixed($category)) {
                 $unitPrice     = (float) $category->minimum_sell_price;
                 $item['price'] = $unitPrice;
                 $fixedTotal   += $unitPrice * (float) $item['quantity'];
@@ -342,7 +618,7 @@ class SalesService
 
         foreach ($items as $idx => &$item) {
             $category = $products[$item['product_id']]?->category;
-            if ($category && ! $category->is_fixed) {
+            if ($category && ! $this->categoryIsFixed($category)) {
                 $pct              = (float) ($category->value_percentage ?? 0);
                 $relative         = (float) $item['quantity'] * ($pct / 100);
                 $item['_rel']     = $relative;
@@ -405,6 +681,81 @@ class SalesService
             $query->whereDate('date', '>=', $filters['date_from']);
         }
 
+        if (! empty($filters['date_to'])) {
+            $query->whereDate('date', '<=', $filters['date_to']);
+        }
+
+        return $query->latest()->paginate($perPage);
+    }
+
+    // ── Cashier: search products that HAVE a saved recipe (for compose) ───────
+    public function searchComposableProducts(?string $search, int $limit = 15): mixed
+    {
+        return Product::query()
+            ->where('is_active', true)
+            ->has('components')
+            ->search($search)
+            ->orderBy('name')
+            ->limit($limit)
+            ->get(['id', 'name', 'sku', 'barcode']);
+    }
+
+    // ── Cashier: resolve a product's recipe (BOM) components ──────────────────
+    // Returns each component enriched with its configured price, unit and the
+    // available shop stock, so the compose modal can build editable lines.
+    public function resolveProductComponents(int $shopId, int $productId): array
+    {
+        $product = Product::with([
+            'components.component:id,name,sku,scalar,category_id,selling_price,price_per_gram',
+            'components.component.category:id,minimum_sell_price,product_type_id',
+            'components.component.category.productType:id,sold_by,pricing_source,default_unit',
+        ])->find($productId);
+
+        if (! $product) {
+            return [];
+        }
+
+        return $product->components->map(function ($c) use ($shopId) {
+            $comp = $c->component;
+            $stock = (float) Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $comp->id))
+                ->where('shop_id', $shopId)
+                ->sum('current_quantity');
+            $type = optional($comp->category)->productType;
+
+            return [
+                'component_product_id'  => $comp->id,
+                'name'                  => $comp->name,
+                'sku'                   => $comp->sku,
+                'unit'                  => $type->default_unit ?? ($comp->scalar ?? ''),
+                'quantity'              => (float) $c->quantity,   // per 1 parent
+                'configured_unit_price' => $this->resolveConfiguredUnitPrice($comp),
+                'shop_stock'            => $stock,
+            ];
+        })->all();
+    }
+
+    // ── Admin: cross-shop invoice review (pending queue, etc.) ────────────────
+
+    public function getInvoicesForAdmin(array $filters, int $perPage): mixed
+    {
+        $query = Invoice::with([
+            'customer',
+            'seller:id,name',
+            'shop:id,name',
+            'items.product:id,name,sku,scalar,category_id',
+            'items.product.category:id,name,minimum_sell_price',
+            'payments.currency:id,code,symbol',
+        ]);
+
+        if (! empty($filters['status'])) {
+            $query->where('status', $filters['status']);
+        }
+        if (! empty($filters['shop_id'])) {
+            $query->where('shop_id', (int) $filters['shop_id']);
+        }
+        if (! empty($filters['date_from'])) {
+            $query->whereDate('date', '>=', $filters['date_from']);
+        }
         if (! empty($filters['date_to'])) {
             $query->whereDate('date', '<=', $filters['date_to']);
         }
