@@ -15,6 +15,7 @@ class Shop extends Model
 
     protected $fillable = [
         'name',
+        'branch_bonus_percent',
         'address',
         'username',
         'password',
@@ -27,8 +28,9 @@ class Shop extends Model
     ];
 
     protected $casts = [
-        'password' => 'hashed',
-        'status'   => 'string',
+        'password'             => 'hashed',
+        'status'               => 'string',
+        'branch_bonus_percent' => 'decimal:2',
     ];
 
     // الموظفون المنتسبون للفرع (علاقة واحد لمتعدد)

@@ -16,8 +16,9 @@ class UpdateShopRequest extends FormRequest
         $shopId = $this->route('id');
 
         return [
-            'name'       => 'sometimes|required|string|max:255',
-            'address'    => 'sometimes|required|string',
+            'name'                 => 'sometimes|required|string|max:255',
+            'branch_bonus_percent' => 'nullable|numeric|min:0|max:100',
+            'address'              => 'sometimes|required|string',
             'username'   => 'sometimes|required|string|min:3|max:255|unique:shops,username,' . $shopId,
             'password'   => 'nullable|string|min:6',
             'status'     => 'sometimes|in:active,inactive',

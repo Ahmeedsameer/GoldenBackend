@@ -33,6 +33,7 @@ class DatabaseSeeder extends Seeder
             ProductSeeder::class,
             SupplierSeeder::class,
             SupplySeeder::class,
+            HrDeductionSettingSeeder::class,   // HR: default (configurable) deduction rules
         ]);
     }
 }

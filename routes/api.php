@@ -232,6 +232,37 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::post('transfer',                   [SafeController::class, 'transfer']);
     });
 
+    // ── HR & Payroll — Employee management (admin only) ───────────────────────
+    Route::group(['prefix' => 'hr'], function () {
+        Route::get('employees',                    [\App\Modules\Hr\Controllers\EmployeeController::class, 'index']);
+        Route::post('employees',                   [\App\Modules\Hr\Controllers\EmployeeController::class, 'store']);
+        Route::get('employees/{id}',               [\App\Modules\Hr\Controllers\EmployeeController::class, 'show']);
+        Route::put('employees/{id}',               [\App\Modules\Hr\Controllers\EmployeeController::class, 'update']);
+        Route::put('employees/{id}/toggle-status', [\App\Modules\Hr\Controllers\EmployeeController::class, 'toggleStatus']);
+
+        // Leave review (approve/reject) — admin only
+        Route::put('leaves/{id}/approve', [\App\Modules\Hr\Controllers\LeaveController::class, 'approve']);
+        Route::put('leaves/{id}/reject',  [\App\Modules\Hr\Controllers\LeaveController::class, 'reject']);
+
+        // Deduction settings (configurable)
+        Route::get('deduction-settings',       [\App\Modules\Hr\Controllers\DeductionSettingController::class, 'index']);
+        Route::put('deduction-settings/{id}',  [\App\Modules\Hr\Controllers\DeductionSettingController::class, 'update']);
+
+        // Payroll engine (generate / lock / unlock / paid) — admin only
+        Route::post('payrolls/generate',    [\App\Modules\Hr\Controllers\PayrollController::class, 'generate']);
+        Route::put('payrolls/{id}/lock',    [\App\Modules\Hr\Controllers\PayrollController::class, 'lock']);
+        Route::put('payrolls/{id}/unlock',  [\App\Modules\Hr\Controllers\PayrollController::class, 'unlock']);
+        Route::put('payrolls/{id}/paid',    [\App\Modules\Hr\Controllers\PayrollController::class, 'markPaid']);
+
+        // Employee temporary transfers
+        Route::get('transfers',              [\App\Modules\Hr\Controllers\TransferController::class, 'index']);
+        Route::post('transfers',             [\App\Modules\Hr\Controllers\TransferController::class, 'store']);
+        Route::get('transfers/{id}',         [\App\Modules\Hr\Controllers\TransferController::class, 'show']);
+        Route::put('transfers/{id}',         [\App\Modules\Hr\Controllers\TransferController::class, 'update']);
+        Route::put('transfers/{id}/approve', [\App\Modules\Hr\Controllers\TransferController::class, 'approve']);
+        Route::put('transfers/{id}/cancel',  [\App\Modules\Hr\Controllers\TransferController::class, 'cancel']);
+    });
+
 });
 
 
@@ -304,4 +335,35 @@ Route::group(['middleware' => ['api', CheckRole::class . ':sales,manager']], fun
         Route::get('override-requests/{id}',    [OverrideRequestController::class, 'show']);
     });
 
+});
+
+
+// ─── HR shared endpoints (Admin + Branch Manager) ──────────────────────────────
+
+Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'prefix' => 'hr'], function () {
+    // Attendance (manager scoped to own branch; admin any branch)
+    Route::get('attendance', [\App\Modules\Hr\Controllers\AttendanceController::class, 'roster']);
+    Route::put('attendance', [\App\Modules\Hr\Controllers\AttendanceController::class, 'mark']);
+
+    // Leave review list (manager sees own branch; admin sees all)
+    Route::get('leaves', [\App\Modules\Hr\Controllers\LeaveController::class, 'index']);
+
+    // Payroll list/detail (manager sees own branch; admin sees all)
+    Route::get('payrolls',      [\App\Modules\Hr\Controllers\PayrollController::class, 'index']);
+    Route::get('payrolls/{id}', [\App\Modules\Hr\Controllers\PayrollController::class, 'show']);
+
+    // Reports (JSON data + CSV/PDF export)
+    Route::get('reports/{type}/export', [\App\Modules\Hr\Controllers\HrReportController::class, 'export']);
+    Route::get('reports/{type}',        [\App\Modules\Hr\Controllers\HrReportController::class, 'data']);
+});
+
+
+// ─── HR self-service (any authenticated employee) ──────────────────────────────
+
+Route::group(['middleware' => ['api', CheckRole::class . ':*'], 'prefix' => 'hr'], function () {
+    Route::post('leaves',     [\App\Modules\Hr\Controllers\LeaveController::class, 'store']);
+    Route::get('leaves/mine', [\App\Modules\Hr\Controllers\LeaveController::class, 'mine']);
+
+    // Personal HR dashboard summary (each employee sees only their own data)
+    Route::get('me/summary',  [\App\Modules\Hr\Controllers\SelfServiceController::class, 'summary']);
 });

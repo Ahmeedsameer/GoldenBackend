@@ -10,9 +10,11 @@ use App\Models\InvoiceItem;
 use App\Models\InvoicePayment;
 use App\Models\Product;
 use App\Models\Safe;
+use App\Models\Shop;
 use App\Models\User;
 use App\Modules\Sales\Enums\PaymentMethod;
 use App\Modules\Safe\Services\SafeService;
+use App\Modules\Hr\Services\ActiveBranchService;
 use App\Modules\Stock\Services\InventoryAlertService;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -206,6 +208,14 @@ class SalesService
             abort(422, 'البائع غير مرتبط بأي فرع، يرجى التواصل مع المدير');
         }
 
+        // ── Resolve the seller's ACTIVE branch (primary, or a live transfer) ──
+        // Every branch-scoped operation below (stock, invoice branch, FIFO, safe,
+        // alerts) uses this. For a non-transferred employee it equals shop_id, so
+        // existing behaviour is unchanged (backward compatible).
+        $activeShopId   = app(ActiveBranchService::class)->activeBranchId($seller) ?? (int) $seller->shop_id;
+        $activeBranch   = Shop::find($activeShopId, ['id', 'name']);
+        $activeBranchNm = $activeBranch?->name;
+
         // ── Validate override token (if provided) ────────────────────────────
         $overrideApproved = false;
         if (! empty($data['override_token'])) {
@@ -215,14 +225,14 @@ class SalesService
             if (
                 $tokenData &&
                 (int) $tokenData['seller_id'] === $seller->id &&
-                (int) $tokenData['shop_id']   === $seller->shop_id
+                (int) $tokenData['shop_id']   === $activeShopId
             ) {
                 $overrideApproved = true;
                 Cache::forget($tokenKey); // one-time use
             }
         }
 
-        $result = DB::transaction(function () use ($data, $seller, $overrideApproved) {
+        $result = DB::transaction(function () use ($data, $seller, $overrideApproved, $activeShopId, $activeBranchNm) {
             // ── 1. Find or create customer by phone ──────────────────────────
             $customer = null;
             if (! empty($data['phone']) || ! empty($data['name'])) {
@@ -254,7 +264,7 @@ class SalesService
 
             foreach ($requestedByProduct as $pid => $requested) {
                 $available = (float) Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $pid))
-                    ->where('shop_id', $seller->shop_id)
+                    ->where('shop_id', $activeShopId)
                     ->sum('current_quantity');
 
                 $name = $products[$pid]->name ?? "#{$pid}";
@@ -321,8 +331,11 @@ class SalesService
             // Status is 'approved' when: no violations, OR manager pre-approved via token.
             $invoice = Invoice::create([
                 'customer_id'  => $customer?->id,
-                'shop_id'      => $seller->shop_id,
+                'shop_id'      => $activeShopId,
+                'branch_name'  => $activeBranchNm,
                 'seller_id'    => $seller->id,
+                'seller_name'  => $seller->name,
+                'seller_email' => $seller->email,
                 'date'         => $data['date'],
                 'price_type'   => $data['price_type'],
                 'status'       => ($violations && ! $overrideApproved) ? 'pending' : 'approved',
@@ -338,13 +351,13 @@ class SalesService
             if (! empty($data['safe_id'])) {
                 $safe = Safe::with('safeType')
                     ->where('id', (int) $data['safe_id'])
-                    ->where('shop_id', $seller->shop_id)
+                    ->where('shop_id', $activeShopId)
                     ->where('is_active', true)
                     ->lockForUpdate()
                     ->firstOrFail();
             } else {
                 $safe = Safe::with('safeType')
-                    ->where('shop_id', $seller->shop_id)
+                    ->where('shop_id', $activeShopId)
                     ->whereHas('safeType', fn($q) => $q->where('kind', 'physical'))
                     ->where('is_active', true)
                     ->lockForUpdate()
@@ -396,13 +409,13 @@ class SalesService
         //    notifications to admins + the branch manager (de-duped by state).
         $soldProductIds = array_unique(array_column($data['items'], 'product_id'));
         foreach ($soldProductIds as $pid) {
-            $this->inventoryAlerts->evaluate((int) $pid, $seller->shop_id);
+            $this->inventoryAlerts->evaluate((int) $pid, $activeShopId);
         }
 
         // 2) Price-violation alert (sold below the category minimum).
         if (! empty($result['violations'])) {
             $this->inventoryAlerts->notifyPriceViolation(
-                $seller->shop_id,
+                $activeShopId,
                 $result['invoice']->id,
                 $result['violations']
             );

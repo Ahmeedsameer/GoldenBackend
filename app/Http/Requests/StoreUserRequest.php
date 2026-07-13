@@ -25,7 +25,11 @@ class StoreUserRequest extends FormRequest
             'name' => 'required|string',
             'email' => 'required|email|unique:users,email',
             'password' => 'required|string|min:8|max:16',
-            'role' => 'required|string|in:admin,manager,sales',
+            // This endpoint creates SYSTEM ADMIN accounts only. Managers and
+            // sellers are employees and must be created via the HR module
+            // (POST /api/hr/employees) so they get a primary branch, salary,
+            // commission, leave balance, etc. Enforced here on the backend.
+            'role' => 'required|string|in:admin',
             'phone' => 'nullable|string|unique:users,phone',
             'shift_start' => 'nullable|date_format:H:i',
             'shift_end' => 'nullable|date_format:H:i|after:shift_start',
@@ -45,7 +49,7 @@ class StoreUserRequest extends FormRequest
             'password.max' => 'كلمة المرور يجب أن لا تزيد عن 16 حرف',
             'role.required' => 'الدور مطلوب',
             'role.string' => 'الدور يجب أن يكون نص',
-            'role.in' => 'الدور يجب أن يكون واحد من: مدير موقع, مدير فرع, بائع',
+            'role.in' => 'هذه الصفحة لإنشاء حسابات المدير العام (admin) فقط. المديرون والبائعون يُنشَؤون من وحدة الموارد البشرية.',
             'phone.string' => 'رقم الهاتف يجب أن يكون نص',
             'phone.unique' => 'رقم الهاتف مستخدم بالفعل',
             'shift_start.date_format' => 'وقت بداية الوردية يجب أن يكون بصيغة H:i (مثال: 08:00)',

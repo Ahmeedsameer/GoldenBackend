@@ -14,12 +14,13 @@ class StoreShopRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name'       => 'required|string|max:255',
-            'address'    => 'required|string',
-            'username'   => 'required|string|min:3|max:255|unique:shops,username',
-            'password'   => 'required|string|min:6',
-            'status'     => 'sometimes|in:active,inactive',
-            'manager_id' => 'nullable|exists:users,id',
+            'name'                 => 'required|string|max:255',
+            'branch_bonus_percent' => 'nullable|numeric|min:0|max:100',
+            'address'              => 'required|string',
+            'username'             => 'required|string|min:3|max:255|unique:shops,username',
+            'password'             => 'required|string|min:6',
+            'status'               => 'sometimes|in:active,inactive',
+            'manager_id'           => 'nullable|exists:users,id',
         ];
     }
 

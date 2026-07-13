@@ -27,7 +27,9 @@ class CashierController extends Controller
             return response()->json(['message' => 'البائع غير مرتبط بأي فرع'], 422);
         }
 
-        $goods = $this->salesService->searchGoods($seller->shop_id, $search, $perPage, $categoryId);
+        // Follow the seller's ACTIVE branch (primary, or a live temporary transfer).
+        $shopId = app(\App\Modules\Hr\Services\ActiveBranchService::class)->activeBranchId($seller) ?? (int) $seller->shop_id;
+        $goods  = $this->salesService->searchGoods($shopId, $search, $perPage, $categoryId);
 
         return response()->json([
             'message' => 'تم جلب البضاعة المتاحة بنجاح',
@@ -158,8 +160,9 @@ class CashierController extends Controller
             return response()->json(['message' => 'البائع غير مرتبط بأي فرع'], 422);
         }
 
-        $safes = Safe::with('safeType')
-            ->where('shop_id', $seller->shop_id)
+        $shopId = app(\App\Modules\Hr\Services\ActiveBranchService::class)->activeBranchId($seller) ?? (int) $seller->shop_id;
+        $safes  = Safe::with('safeType')
+            ->where('shop_id', $shopId)
             ->where('is_active', true)
             ->get();
 
