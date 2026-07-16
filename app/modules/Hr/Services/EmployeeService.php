@@ -3,6 +3,7 @@
 namespace App\Modules\Hr\Services;
 
 use App\Models\User;
+use App\Modules\Convention\Services\NotificationService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 
@@ -24,7 +25,10 @@ class EmployeeService
         'hr_notes',
     ];
 
-    public function __construct(private HrAuditLogger $audit) {}
+    public function __construct(
+        private HrAuditLogger $audit,
+        private NotificationService $notifications,
+    ) {}
 
     public function create(array $data): User
     {
@@ -76,6 +80,19 @@ class EmployeeService
             $this->auditFieldChange($user, 'role.changed',              $before, $user, 'role');
             $this->auditFieldChange($user, 'primary_branch.changed',    $before, $user, 'shop_id');
             $this->auditFieldChange($user, 'status.changed',            $before, $user, 'status');
+
+            if (array_key_exists('base_salary', $before) && (string) $before['base_salary'] !== (string) $user->base_salary) {
+                $this->notifications->notify([$user->id], 'employee', 'تم تعديل راتبك الأساسي',
+                    'تم تحديث راتبك الأساسي — راجع صفحة ملفّك الوظيفي.', ['type' => 'employee', 'route' => '/dashboard/my-profile']);
+            }
+            if (array_key_exists('personal_commission_percent', $before) && (string) $before['personal_commission_percent'] !== (string) $user->personal_commission_percent) {
+                $this->notifications->notify([$user->id], 'employee', 'تم تعديل نسبة عمولتك',
+                    'تم تحديث نسبة عمولتك الشخصية — راجع صفحة ملفّك الوظيفي.', ['type' => 'employee', 'route' => '/dashboard/my-profile']);
+            }
+            if (array_key_exists('shop_id', $before) && (string) $before['shop_id'] !== (string) $user->shop_id) {
+                $this->notifications->notify([$user->id], 'employee', 'تم تغيير فرعك الأساسي',
+                    'تم تغيير الفرع الأساسي الخاص بك — راجع صفحة ملفّك الوظيفي.', ['type' => 'employee', 'route' => '/dashboard/my-profile']);
+            }
 
             return $user->load('primaryBranch');
         });

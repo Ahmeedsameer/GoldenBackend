@@ -13,3 +13,6 @@ Schedule::command('hr:process-transfers')->dailyAt('00:05');
 
 // HR — repeated-absence + incomplete-attendance alerts (daily, end of day).
 Schedule::command('hr:attendance-alerts')->dailyAt('20:00');
+
+// HR — notify employees + admins about salary-advance installments due this month.
+Schedule::command('hr:notify-due-advances')->monthlyOn(1, '06:00');

@@ -239,10 +239,28 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::get('employees/{id}',               [\App\Modules\Hr\Controllers\EmployeeController::class, 'show']);
         Route::put('employees/{id}',               [\App\Modules\Hr\Controllers\EmployeeController::class, 'update']);
         Route::put('employees/{id}/toggle-status', [\App\Modules\Hr\Controllers\EmployeeController::class, 'toggleStatus']);
+        Route::get('employees/{id}/timeline',      [\App\Modules\Hr\Controllers\SelfServiceController::class, 'timelineFor']);
 
         // Leave review (approve/reject) — admin only
         Route::put('leaves/{id}/approve', [\App\Modules\Hr\Controllers\LeaveController::class, 'approve']);
         Route::put('leaves/{id}/reject',  [\App\Modules\Hr\Controllers\LeaveController::class, 'reject']);
+
+        // Bonuses & Penalties — admin only (create/edit/delete)
+        Route::get('bonuses',          [\App\Modules\Hr\Controllers\BonusPenaltyController::class, 'bonusIndex']);
+        Route::post('bonuses',         [\App\Modules\Hr\Controllers\BonusPenaltyController::class, 'bonusStore']);
+        Route::put('bonuses/{id}',     [\App\Modules\Hr\Controllers\BonusPenaltyController::class, 'bonusUpdate']);
+        Route::delete('bonuses/{id}',  [\App\Modules\Hr\Controllers\BonusPenaltyController::class, 'bonusDestroy']);
+        Route::get('penalties',         [\App\Modules\Hr\Controllers\BonusPenaltyController::class, 'penaltyIndex']);
+        Route::post('penalties',        [\App\Modules\Hr\Controllers\BonusPenaltyController::class, 'penaltyStore']);
+        Route::put('penalties/{id}',    [\App\Modules\Hr\Controllers\BonusPenaltyController::class, 'penaltyUpdate']);
+        Route::delete('penalties/{id}', [\App\Modules\Hr\Controllers\BonusPenaltyController::class, 'penaltyDestroy']);
+
+        // Salary advances — review/approve/plan is admin only
+        Route::put('advances/{id}/reject',      [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'reject']);
+        Route::put('advances/{id}/approve',     [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'approve']);
+        Route::put('advances/{id}/cancel',      [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'cancel']);
+        Route::put('advances/{id}/plan',        [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'updatePlan']);
+        Route::post('advances/{id}/repayments', [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'storeRepayment']);
 
         // Deduction settings (configurable)
         Route::get('deduction-settings',       [\App\Modules\Hr\Controllers\DeductionSettingController::class, 'index']);
@@ -261,6 +279,14 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::put('transfers/{id}',         [\App\Modules\Hr\Controllers\TransferController::class, 'update']);
         Route::put('transfers/{id}/approve', [\App\Modules\Hr\Controllers\TransferController::class, 'approve']);
         Route::put('transfers/{id}/cancel',  [\App\Modules\Hr\Controllers\TransferController::class, 'cancel']);
+
+        // Shift templates management (Weekly Schedule)
+        Route::post('shift-templates',              [\App\Modules\Hr\Controllers\ScheduleController::class, 'storeShiftTemplate']);
+        Route::get('shift-templates/all',            [\App\Modules\Hr\Controllers\ScheduleController::class, 'allShiftTemplates']);
+        Route::put('shift-templates/{id}',           [\App\Modules\Hr\Controllers\ScheduleController::class, 'updateShiftTemplate']);
+        Route::put('shift-templates/{id}/archive',   [\App\Modules\Hr\Controllers\ScheduleController::class, 'archiveShiftTemplate']);
+        Route::put('shift-templates/{id}/restore',   [\App\Modules\Hr\Controllers\ScheduleController::class, 'restoreShiftTemplate']);
+        Route::delete('shift-templates/{id}',        [\App\Modules\Hr\Controllers\ScheduleController::class, 'destroyShiftTemplate']);
     });
 
 });
@@ -338,6 +364,16 @@ Route::group(['middleware' => ['api', CheckRole::class . ':sales,manager']], fun
 });
 
 
+// ─── Salary advance self-service (any authenticated employee) ─────────────────
+// Registered BEFORE the admin+manager `advances/{id}` route below so the
+// literal `advances/mine` path always wins over the `{id}` wildcard.
+
+Route::group(['middleware' => ['api', CheckRole::class . ':*'], 'prefix' => 'hr'], function () {
+    Route::post('advances',     [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'store']);
+    Route::get('advances/mine', [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'mine']);
+});
+
+
 // ─── HR shared endpoints (Admin + Branch Manager) ──────────────────────────────
 
 Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'prefix' => 'hr'], function () {
@@ -348,6 +384,13 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'pre
     // Leave review list (manager sees own branch; admin sees all)
     Route::get('leaves', [\App\Modules\Hr\Controllers\LeaveController::class, 'index']);
 
+    // End an APPROVED leave early — admin: any employee; manager: own-branch non-managers only (checked in controller)
+    Route::put('leaves/{id}/end-early', [\App\Modules\Hr\Controllers\LeaveController::class, 'endEarly']);
+
+    // Salary advances — manager sees own-branch requests read-only (no approve/reject/plan routes here)
+    Route::get('advances',      [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'index']);
+    Route::get('advances/{id}', [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'show']);
+
     // Payroll list/detail (manager sees own branch; admin sees all)
     Route::get('payrolls',      [\App\Modules\Hr\Controllers\PayrollController::class, 'index']);
     Route::get('payrolls/{id}', [\App\Modules\Hr\Controllers\PayrollController::class, 'show']);
@@ -355,6 +398,18 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'pre
     // Reports (JSON data + CSV/PDF export)
     Route::get('reports/{type}/export', [\App\Modules\Hr\Controllers\HrReportController::class, 'export']);
     Route::get('reports/{type}',        [\App\Modules\Hr\Controllers\HrReportController::class, 'data']);
+
+    // Weekly Schedule (manager scoped to own branch; admin any branch)
+    Route::get('schedule',          [\App\Modules\Hr\Controllers\ScheduleController::class, 'roster']);
+    Route::put('schedule',          [\App\Modules\Hr\Controllers\ScheduleController::class, 'upsert']);
+    Route::put('schedule/bulk',     [\App\Modules\Hr\Controllers\ScheduleController::class, 'bulkUpsert']);
+    Route::post('schedule/publish', [\App\Modules\Hr\Controllers\ScheduleController::class, 'publish']);
+    Route::post('schedule/cancel',  [\App\Modules\Hr\Controllers\ScheduleController::class, 'cancel']);
+    Route::get('schedule/export',   [\App\Modules\Hr\Controllers\ScheduleController::class, 'export']);
+    Route::get('shift-templates',   [\App\Modules\Hr\Controllers\ScheduleController::class, 'shiftTemplates']);
+
+    // Attendance self-history browsing for managers reviewing their own record
+    // (the roster endpoint above already covers branch-wide management).
 });
 
 
@@ -366,4 +421,19 @@ Route::group(['middleware' => ['api', CheckRole::class . ':*'], 'prefix' => 'hr'
 
     // Personal HR dashboard summary (each employee sees only their own data)
     Route::get('me/summary',  [\App\Modules\Hr\Controllers\SelfServiceController::class, 'summary']);
+    Route::get('me/profile',  [\App\Modules\Hr\Controllers\SelfServiceController::class, 'profile']);
+    Route::get('me/sales',    [\App\Modules\Hr\Controllers\SelfServiceController::class, 'sales']);
+
+    // My Schedule (published entries only) + My Attendance (own history)
+    Route::get('schedule/mine',   [\App\Modules\Hr\Controllers\ScheduleController::class, 'mine']);
+    Route::get('attendance/mine', [\App\Modules\Hr\Controllers\AttendanceController::class, 'mine']);
+
+    // My Bonuses / My Penalties (own rows only) + Employment Timeline
+    Route::get('bonuses/mine',   [\App\Modules\Hr\Controllers\BonusPenaltyController::class, 'bonusMine']);
+    Route::get('penalties/mine', [\App\Modules\Hr\Controllers\BonusPenaltyController::class, 'penaltyMine']);
+    Route::get('me/timeline',    [\App\Modules\Hr\Controllers\SelfServiceController::class, 'timeline']);
+
+    // Leave self-service: cancel own PENDING request
+    Route::put('leaves/{id}/cancel', [\App\Modules\Hr\Controllers\LeaveController::class, 'cancel']);
+
 });

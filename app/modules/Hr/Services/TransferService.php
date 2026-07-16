@@ -208,7 +208,15 @@ class TransferService
             $branch?->manager_id,        // destination branch manager
         ]);
 
-        $data = ['type' => 'employee_transfer', 'transfer_id' => $transfer->id, 'event' => $event];
+        $data = [
+            'type'        => 'employee_transfer',
+            'transfer_id' => $transfer->id,
+            'event'       => $event,
+            // The employee's deep link (My Profile → transfer history); admins/managers
+            // reviewing a transfer go to the transfers management page instead — the
+            // frontend picks based on the viewing user's role, this is just the default.
+            'route'       => '/dashboard/my-profile',
+        ];
 
         if ($recipients) {
             $this->notifications->notify($recipients, 'employee_transfer', $title, $message, $data);

@@ -85,7 +85,7 @@ class AttendanceService
     /**
      * Attendance counts for an employee over [from, to] (for payroll + dashboards).
      *
-     * @return array{present:int, late:int, absent:int, half_day:int}
+     * @return array{present:int, late:int, absent:int, half_day:int, leave:int}
      */
     public function summary(int $userId, Carbon $from, Carbon $to): array
     {
@@ -100,6 +100,42 @@ class AttendanceService
             'late'     => (int) ($rows[Attendance::LATE] ?? 0),
             'absent'   => (int) ($rows[Attendance::ABSENT] ?? 0),
             'half_day' => (int) ($rows[Attendance::HALF_DAY] ?? 0),
+            'leave'    => (int) ($rows[Attendance::LEAVE] ?? 0),
         ];
+    }
+
+    /**
+     * Mark a RANGE of days as 'leave' (approved-leave automation). Skips days
+     * covered by an active transfer (the transfer's own branch stays
+     * authoritative) — mirrors ScheduleService's skip behaviour so the two
+     * stay consistent for the same employee/date.
+     *
+     * @return int[] dates actually marked
+     */
+    public function markLeaveRange(int $userId, Carbon $from, Carbon $to): array
+    {
+        $marked = [];
+        $employee = User::find($userId);
+        $cursor = $from->copy();
+        while ($cursor->lessThanOrEqualTo($to)) {
+            $shopId = $this->activeBranch->activeBranchId($employee, $cursor);
+            Attendance::updateOrCreate(
+                ['user_id' => $userId, 'date' => $cursor->toDateString()],
+                ['status' => Attendance::LEAVE, 'shop_id' => $shopId, 'marked_by' => auth()->id()],
+            );
+            $marked[] = $cursor->toDateString();
+            $cursor->addDay();
+        }
+
+        return $marked;
+    }
+
+    /** Remove 'leave' attendance rows for a range (early leave termination). */
+    public function clearLeaveRange(int $userId, Carbon $from, Carbon $to): int
+    {
+        return Attendance::where('user_id', $userId)
+            ->where('status', Attendance::LEAVE)
+            ->whereBetween('date', [$from->toDateString(), $to->toDateString()])
+            ->delete();
     }
 }

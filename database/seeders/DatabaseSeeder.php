@@ -34,6 +34,7 @@ class DatabaseSeeder extends Seeder
             SupplierSeeder::class,
             SupplySeeder::class,
             HrDeductionSettingSeeder::class,   // HR: default (configurable) deduction rules
+            ShiftTemplateSeeder::class,        // HR: default shift templates (schedule module)
         ]);
     }
 }

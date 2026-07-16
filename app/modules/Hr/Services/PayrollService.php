@@ -18,12 +18,20 @@ use Illuminate\Validation\ValidationException;
  *   Final Salary = Base Salary
  *                + Personal Sales Commission
  *                + Branch Bonus (equal share of branch pools)
- *                − Deductions (absence / late / half-day / unpaid leave)
+ *                + Manual Bonuses
+ *                − Manual Penalties
+ *                − Automatic Attendance Deductions (absence / late / half-day)
+ *                − Unpaid Leave Deductions
+ *                − Salary Advance Installment (if one is due this month)
  *
  * Salary + percentages are snapshotted onto the payroll row; the full breakdown
  * is stored as immutable payroll_lines. A locked payroll can never be
  * regenerated. Deduction values are read from hr_deduction_settings (never
- * hardcoded); the daily rate = base_salary / days-in-month.
+ * hardcoded); the daily rate = base_salary / days-in-month. Bonuses/Penalties
+ * are read live from the `bonuses`/`penalties` tables (never duplicated
+ * anywhere else) at generation time — exactly like commission and branch
+ * bonus — so editing a deduction rule or adding a bonus never rewrites an
+ * already-generated (and especially a locked) payroll.
  */
 class PayrollService
 {
@@ -31,6 +39,8 @@ class PayrollService
         private CommissionService $commissions,
         private AttendanceService $attendance,
         private NotificationService $notifications,
+        private BonusPenaltyService $bonusPenalty,
+        private SalaryAdvanceService $salaryAdvance,
     ) {}
 
     /**
@@ -103,7 +113,20 @@ class PayrollService
                 ];
             }
 
-            $gross = round($base + $personal['amount'] + $branch['total'], 2);
+            // ── Manual Bonuses & Penalties (this month) ───────────────────────
+            $bonuses      = $this->bonusPenalty->bonusesFor($employee->id, $from, $to);
+            $penalties    = $this->bonusPenalty->penaltiesFor($employee->id, $from, $to);
+            $bonusTotal   = round((float) $bonuses->sum('amount'), 2);
+            $penaltyTotal = round((float) $penalties->sum('amount'), 2);
+
+            $totalDeductions += $penaltyTotal;
+
+            // ── Salary Advance installment (this month, if any is due) ────────
+            $advanceHit = $this->salaryAdvance->deductForPayroll($employee, $year, $month);
+            $advanceDeduction = $advanceHit ? (float) $advanceHit['installment']->planned_amount : 0.0;
+            $totalDeductions += $advanceDeduction;
+
+            $gross = round($base + $personal['amount'] + $branch['total'] + $bonusTotal, 2);
             $net   = round($gross - $totalDeductions, 2);
 
             // ── Persist immutable payroll ─────────────────────────────────────
@@ -116,6 +139,9 @@ class PayrollService
                 'personal_sales_total'        => $personal['sales_total'],
                 'personal_commission_amount'  => $personal['amount'],
                 'branch_commission_amount'    => $branch['total'],
+                'bonus_total'                 => $bonusTotal,
+                'penalty_total'               => $penaltyTotal,
+                'advance_deduction'           => $advanceDeduction,
                 'gross'                       => $gross,
                 'total_deductions'            => round($totalDeductions, 2),
                 'net_salary'                  => $net,
@@ -142,19 +168,39 @@ class PayrollService
                 $lines[] = ['type' => PayrollLine::BRANCH_COMMISSION, 'label' => 'بونص الفرع', 'shop_id' => $seg['shop_id'],
                     'amount' => $seg['share'], 'meta' => $seg];
             }
+            foreach ($bonuses as $b) {
+                $lines[] = ['type' => PayrollLine::BONUS, 'label' => $b->reason, 'amount' => (float) $b->amount,
+                    'meta' => ['bonus_id' => $b->id, 'date' => $b->date->toDateString(), 'notes' => $b->notes]];
+            }
+            foreach ($penalties as $p) {
+                $lines[] = ['type' => PayrollLine::PENALTY, 'label' => $p->reason, 'amount' => -(float) $p->amount,
+                    'meta' => ['penalty_id' => $p->id, 'date' => $p->date->toDateString(), 'notes' => $p->notes]];
+            }
+            if ($advanceHit) {
+                $lines[] = ['type' => PayrollLine::ADVANCE, 'label' => 'قسط سلفة راتب', 'amount' => -$advanceDeduction,
+                    'meta' => ['advance_id' => $advanceHit['advance']->id, 'installment_id' => $advanceHit['installment']->id,
+                        'remaining_after' => round($advanceHit['advance']->remaining_balance - $advanceDeduction, 2)]];
+            }
             $lines = array_merge($lines, $deductionLines);
 
             foreach ($lines as $l) {
                 $payroll->lines()->create($l);
             }
 
+            // Finalize the advance installment now that the Payroll row exists (needs its id).
+            if ($advanceHit) {
+                $this->salaryAdvance->markInstallmentDeducted($advanceHit['installment'], $payroll);
+            }
+
             // Notify the employee their payroll is ready.
             $this->notifications->notify([$employee->id], 'payroll', 'تم إصدار كشف راتبك',
-                "كشف راتب {$month}/{$year}: صافي " . number_format($net, 2) . " ج.م", ['type' => 'payroll', 'payroll_id' => $payroll->id]);
+                "كشف راتب {$month}/{$year}: صافي " . number_format($net, 2) . " ج.م",
+                ['type' => 'payroll', 'payroll_id' => $payroll->id, 'route' => '/dashboard/my-profile']);
 
             if ($totalDeductions > 0) {
                 $this->notifications->notify([$employee->id], 'payroll', 'خصومات على الراتب',
-                    "طُبّقت خصومات بقيمة " . number_format($totalDeductions, 2) . " ج.م على راتب {$month}/{$year}.", ['type' => 'payroll']);
+                    "طُبّقت خصومات بقيمة " . number_format($totalDeductions, 2) . " ج.م على راتب {$month}/{$year}.",
+                    ['type' => 'payroll', 'payroll_id' => $payroll->id, 'route' => '/dashboard/my-profile']);
             }
 
             return $payroll->load('lines');

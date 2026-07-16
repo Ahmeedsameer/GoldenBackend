@@ -70,6 +70,30 @@ class AttendanceController extends Controller
         return response()->json(['message' => 'تم تسجيل الحضور', 'data' => $record]);
     }
 
+    /** GET /api/hr/attendance/mine?year=&month= — the authenticated employee's own history + monthly summary. */
+    public function mine(Request $request)
+    {
+        $year  = $request->integer('year', now()->year);
+        $month = $request->integer('month', now()->month);
+        $from  = Carbon::create($year, $month, 1)->startOfMonth();
+        $to    = $from->copy()->endOfMonth();
+
+        $history = Attendance::where('user_id', $request->user()->id)
+            ->whereBetween('date', [$from->toDateString(), $to->toDateString()])
+            ->with('shop:id,name')
+            ->orderByDesc('date')
+            ->get(['id', 'date', 'status', 'shop_id', 'note']);
+
+        return response()->json([
+            'message' => 'ok',
+            'data'    => [
+                'year' => $year, 'month' => $month,
+                'summary' => $this->attendance->summary($request->user()->id, $from, $to),
+                'history' => $history,
+            ],
+        ]);
+    }
+
     /** Which branch the current request is scoped to. */
     private function resolveScopeShopId(Request $request): ?int
     {

@@ -11,6 +11,7 @@ class Attendance extends Model
     public const LATE     = 'late';
     public const ABSENT   = 'absent';
     public const HALF_DAY = 'half_day';
+    public const LEAVE    = 'leave';
 
     protected $fillable = [
         'user_id',

@@ -4,6 +4,7 @@ namespace App\Modules\Hr\Controllers;
 
 use App\Http\Controllers\Controller;
 use App\Modules\Hr\Services\HrReportService;
+use App\Support\ArabicPdfFont;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -48,6 +49,7 @@ class HrReportController extends Controller
     private function pdf(array $report, string $file)
     {
         $pdf = Pdf::loadView('hr.report', ['report' => $report])->setPaper('a4', 'landscape');
+        ArabicPdfFont::apply($pdf);
 
         return $pdf->download("{$file}.pdf");
     }

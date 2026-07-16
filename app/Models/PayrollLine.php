@@ -11,6 +11,9 @@ class PayrollLine extends Model
     public const PERSONAL_COMMISSION = 'personal_commission';
     public const BRANCH_COMMISSION   = 'branch_commission';
     public const DEDUCTION           = 'deduction';
+    public const BONUS               = 'bonus';
+    public const PENALTY             = 'penalty';
+    public const ADVANCE             = 'salary_advance';
 
     protected $fillable = [
         'payroll_id',
