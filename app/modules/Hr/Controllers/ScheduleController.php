@@ -3,12 +3,15 @@
 namespace App\Modules\Hr\Controllers;
 
 use App\Http\Controllers\Controller;
+use App\Models\CompanySetting;
 use App\Models\ScheduleEntry;
 use App\Models\ShiftTemplate;
 use App\Models\Shop;
 use App\Models\User;
 use App\Modules\Hr\Services\ScheduleService;
 use App\Support\ArabicPdfFont;
+use App\Support\ArabicShaper;
+use App\Support\PdfPageFooter;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -122,10 +125,27 @@ class ScheduleController extends Controller
         $roster = $this->schedule->weekRoster($from, $to, $this->scopedFilters($request));
 
         $typeLabels = $this->typeLabels();
+        $company = CompanySetting::current();
 
-        $pdf = Pdf::loadView('hr.schedule', ['roster' => $roster, 'typeLabels' => $typeLabels])
-            ->setPaper('a3', 'landscape');
+        // dompdf cannot join/reorder Arabic glyphs itself (see ArabicShaper) —
+        // shape a COPY for the PDF only; $roster/$typeLabels are also used
+        // for the JSON view, which must keep plain logical Arabic text.
+        $shapedRoster = ArabicShaper::reverseRosterDays(ArabicShaper::shapeDeep($roster));
+        $shapedTypeLabels = ArabicShaper::shapeDeep($typeLabels);
+        $companyDisplay = ArabicShaper::companyDisplay($company);
+        $metaLine = ArabicShaper::shape(
+            "{$roster['from']} → {$roster['to']} · {$company->name} — الموارد البشرية · " . now()->format('Y-m-d H:i')
+        );
+
+        $pdf = Pdf::loadView('hr.schedule', [
+            'roster' => $shapedRoster,
+            'typeLabels' => $shapedTypeLabels,
+            'company' => $company,
+            'companyDisplay' => $companyDisplay,
+            'metaLine' => $metaLine,
+        ])->setPaper('a3', 'landscape');
         ArabicPdfFont::apply($pdf);
+        PdfPageFooter::apply($pdf);
 
         return $pdf->download("weekly-schedule-{$roster['from']}.pdf");
     }

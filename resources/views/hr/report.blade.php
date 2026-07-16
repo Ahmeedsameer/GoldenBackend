@@ -4,18 +4,20 @@
     <meta charset="utf-8">
     <style>
         * { font-family: 'Tajawal', 'DejaVu Sans', sans-serif; }
-        body { direction: rtl; color: #1f2937; font-size: 11px; }
+        body { direction: rtl; color: #1f2937; font-size: 11px; margin-bottom: 40px; }
         h1 { font-size: 15px; margin: 0 0 4px; }
         .meta { color: #6b7280; font-size: 10px; margin-bottom: 12px; }
         table { width: 100%; border-collapse: collapse; }
         th, td { border: 1px solid #d1d5db; padding: 5px 7px; text-align: right; }
         th { background: #f3f4f6; font-weight: bold; }
         tr:nth-child(even) td { background: #fafafa; }
+        @include('partials.pdf-branding-css')
     </style>
 </head>
 <body>
+    @include('partials.pdf-letterhead')
     <h1>{{ $report['title'] }}</h1>
-    <div class="meta">Alpha Business — الموارد البشرية · {{ now()->format('Y-m-d H:i') }}</div>
+    <div class="meta">{{ $metaLine }}</div>
     <table>
         <thead>
             <tr>
@@ -32,9 +34,10 @@
                     @endforeach
                 </tr>
             @empty
-                <tr><td colspan="{{ count($report['columns']) ?: 1 }}">لا توجد بيانات</td></tr>
+                <tr><td colspan="{{ count($report['columns']) ?: 1 }}">{{ ar('لا توجد بيانات') }}</td></tr>
             @endforelse
         </tbody>
     </table>
+    @include('partials.pdf-footer')
 </body>
 </html>

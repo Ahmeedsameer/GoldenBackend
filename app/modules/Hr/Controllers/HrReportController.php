@@ -3,8 +3,11 @@
 namespace App\Modules\Hr\Controllers;
 
 use App\Http\Controllers\Controller;
+use App\Models\CompanySetting;
 use App\Modules\Hr\Services\HrReportService;
 use App\Support\ArabicPdfFont;
+use App\Support\ArabicShaper;
+use App\Support\PdfPageFooter;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -46,10 +49,34 @@ class HrReportController extends Controller
         }, "{$file}.csv", ['Content-Type' => 'text/csv; charset=UTF-8']);
     }
 
+    /**
+     * dompdf cannot join/reorder Arabic glyphs itself (see ArabicShaper),
+     * so every Arabic-bearing string is pre-shaped into a COPY here — never
+     * mutate $report itself, since csv() needs the original logical text
+     * (Excel renders Arabic natively and correctly on its own).
+     */
     private function pdf(array $report, string $file)
     {
-        $pdf = Pdf::loadView('hr.report', ['report' => $report])->setPaper('a4', 'landscape');
+        $company = CompanySetting::current();
+        $shapedReport = ArabicShaper::reverseTableColumns(ArabicShaper::shapeDeep($report));
+        $companyDisplay = ArabicShaper::companyDisplay($company);
+
+        // Built and shaped as ONE logical line — shaping fragments separately
+        // and concatenating them afterwards would break the overall bidi
+        // flow (each fragment would reorder independently instead of as a
+        // single right-to-left paragraph).
+        $metaLine = ArabicShaper::shape(
+            "{$company->name} — الموارد البشرية · " . now()->format('Y-m-d H:i')
+        );
+
+        $pdf = Pdf::loadView('hr.report', [
+            'report' => $shapedReport,
+            'company' => $company,
+            'companyDisplay' => $companyDisplay,
+            'metaLine' => $metaLine,
+        ])->setPaper('a4', 'landscape');
         ArabicPdfFont::apply($pdf);
+        PdfPageFooter::apply($pdf);
 
         return $pdf->download("{$file}.pdf");
     }

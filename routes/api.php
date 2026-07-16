@@ -9,6 +9,7 @@ use App\Http\Controllers\Admin\ShopEmployeeController;
 use App\Http\Controllers\Admin\ShopManagerController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CategoryController;
+use App\Http\Controllers\CompanySettingsController;
 use App\Http\Controllers\ProductController;
 use App\Http\Controllers\ProductTypeController;
 use App\Http\Controllers\UsersManagmentController;
@@ -43,6 +44,11 @@ Route::group(['middleware' => 'api', 'prefix' => 'auth'], function () {
 });
 
 
+// ─── Company branding (public — needed by the login page and app-init, pre-auth) ─
+
+Route::get('company-settings', [CompanySettingsController::class, 'show']);
+
+
 // ─── Notifications (any authenticated user) ─────────────────────────────────────
 
 Route::group(['middleware' => ['api', CheckRole::class . ':*'], 'prefix' => 'notifications'], function () {
@@ -71,6 +77,9 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
 
     // ── Product Types (inventory behavior: Oil, Bottle, Accessory, Packaging) ─
     Route::get('product-types', [ProductTypeController::class, 'index']);
+
+    // ── Company branding settings (logo upload via POST — multipart) ─────────
+    Route::post('company-settings', [CompanySettingsController::class, 'update']);
 
     // ── Invoice review (pending queue → approve / reject) ────────────────────
     Route::group(['prefix' => 'admin/invoices'], function () {
