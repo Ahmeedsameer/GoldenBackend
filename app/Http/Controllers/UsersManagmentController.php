@@ -20,9 +20,11 @@ class UsersManagmentController extends Controller
     
 
 
+    // This page is scoped to Admin accounts only — other roles (manager, sales) are
+    // managed separately under HR > الموظفون (see EmployeeController).
     public function index()
     {
-        $query = User::query();
+        $query = User::query()->where('role', 'admin');
 
         if (request()->has('name')) {
             $query->where('name', 'like', '%' . request('name') . '%');
@@ -30,10 +32,6 @@ class UsersManagmentController extends Controller
 
         if (request()->has('email')) {
             $query->where('email', 'like', '%' . request('email') . '%');
-        }
-
-        if (request()->has('role') && in_array(request('role'), ['admin', 'supervisor', 'employee', 'accountant'])) {
-            $query->where('role', request('role'));
         }
 
         $limit = 20;

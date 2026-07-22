@@ -22,6 +22,39 @@ class Product extends Model
         'purchase_cost',
         'warning_quantity',
         'critical_quantity',
+        'product_type',
+        'show_in_catalog',
+        'capacity_ml',
+        'default_selling_price',
+        'priced_cost',
+        'priced_at',
+        'notes',
+    ];
+
+    /**
+     * Product creation type — chosen once, up front, in the "what do you want
+     * to create?" selector. Drives which fields the create/edit form shows
+     * and how the product behaves in Sales:
+     *  - RAW_MATERIAL: inventory-only (oils, alcohol, fixatives, …). Never in catalog.
+     *  - PACKAGING: inventory-only bottles (capacity_ml set). Never in catalog.
+     *  - COMPOUND: catalog-visible, NO inventory, NO predefined recipe — the
+     *    seller freely picks any oil + quantity + bottle at sale time
+     *    (see SalesService::calculateCompoundPrice).
+     *  - READY_PRODUCT: catalog-visible, behaves exactly like a normal product
+     *    (fixed price, own inventory) — today's pre-existing behavior.
+     * Independent of category->productType (oil/bottle/accessory/packaging),
+     * which still drives per-gram vs per-unit pricing and is untouched.
+     */
+    public const TYPE_RAW_MATERIAL  = 'RAW_MATERIAL';
+    public const TYPE_PACKAGING     = 'PACKAGING';
+    public const TYPE_COMPOUND      = 'COMPOUND';
+    public const TYPE_READY_PRODUCT = 'READY_PRODUCT';
+
+    public const PRODUCT_TYPES = [
+        self::TYPE_RAW_MATERIAL,
+        self::TYPE_PACKAGING,
+        self::TYPE_COMPOUND,
+        self::TYPE_READY_PRODUCT,
     ];
 
     protected $casts = [
@@ -31,6 +64,11 @@ class Product extends Model
         'purchase_cost'     => 'decimal:2',
         'warning_quantity'  => 'decimal:3',
         'critical_quantity' => 'decimal:3',
+        'show_in_catalog'   => 'boolean',
+        'capacity_ml'       => 'decimal:2',
+        'default_selling_price' => 'decimal:2',
+        'priced_cost'           => 'decimal:2',
+        'priced_at'             => 'datetime',
     ];
 
     protected $appends = ['profit'];
@@ -44,6 +82,12 @@ class Product extends Model
     public function components()
     {
         return $this->hasMany(ProductComponent::class, 'product_id');
+    }
+
+    /** Pricing Management audit trail — every cost refresh / selling-price edit. */
+    public function priceHistories()
+    {
+        return $this->hasMany(PriceHistory::class)->latest();
     }
 
     /**

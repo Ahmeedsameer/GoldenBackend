@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Requests\CreateProductRequest;
 use App\Http\Requests\UpdateProductRequest;
 use App\Http\Resources\ProductResource;
+use App\Http\Services\ProductDetailService;
 use App\Http\Services\ProductService;
 use App\Models\Product;
 use Illuminate\Http\Request;
@@ -19,10 +20,75 @@ class ProductController extends Controller
 
 
 
-   
 
-    public function __construct(private ProductService $productService) {
-        
+
+    public function __construct(
+        private ProductService $productService,
+        private ProductDetailService $productDetailService,
+        private \App\Services\Reports\ReportExportService $reportExportService,
+    ) {
+
+    }
+
+    // ── Product Details page ────────────────────────────────────────────────
+
+    public function detail(int $id)
+    {
+        $product = Product::findOrFail($id);
+
+        return response()->json(['message' => 'ok', 'data' => $this->productDetailService->summary($product)]);
+    }
+
+    public function purchaseHistory(int $id, Request $request)
+    {
+        $product = Product::findOrFail($id);
+        $perPage = min((int) $request->get('per_page', 15), 100);
+        $filters = $request->only(['search', 'sort', 'direction']);
+
+        return response()->json(['message' => 'ok', 'data' => $this->productDetailService->purchaseHistory($product, $filters, $perPage)]);
+    }
+
+    public function movements(int $id, Request $request)
+    {
+        $product = Product::findOrFail($id);
+        $perPage = min((int) $request->get('per_page', 15), 100);
+        $page = (int) $request->get('page', 1);
+
+        return response()->json(['message' => 'ok', 'data' => $this->productDetailService->movements($product, $perPage, $page)]);
+    }
+
+    public function supplierHistory(int $id)
+    {
+        $product = Product::findOrFail($id);
+
+        return response()->json(['message' => 'ok', 'data' => $this->productDetailService->supplierHistory($product)]);
+    }
+
+    /** GET /api/products/{id}/purchase-history/export?format=pdf|excel — every row, unpaginated. */
+    public function exportPurchaseHistory(int $id, Request $request)
+    {
+        $product = Product::findOrFail($id);
+        $filters = $request->only(['search', 'sort', 'direction']);
+        $all = $this->productDetailService->purchaseHistory($product, $filters, 100000);
+
+        $columns = ['التاريخ', 'المورد', 'رقم التوريد', 'الكمية', 'سعر الشراء', 'الإجمالي', 'الفرع'];
+        $rows = collect($all->items())->map(fn ($r) => [
+            $r->date, $r->supplier_name, '#' . $r->supply_id, $r->quantity, $r->unit_price, $r->total_cost, $r->branch_name,
+        ])->all();
+
+        $title = 'سجل مشتريات ' . $product->name;
+        $filtersApplied = array_filter(['بحث' => $filters['search'] ?? null]);
+
+        return $request->input('format') === 'excel'
+            ? $this->reportExportService->excel($title, $columns, $rows, $filtersApplied, [4, 5])
+            : $this->reportExportService->pdf($title, $columns, $rows, $filtersApplied);
+    }
+
+    public function analytics(int $id)
+    {
+        $product = Product::findOrFail($id);
+
+        return response()->json(['message' => 'ok', 'data' => $this->productDetailService->analytics($product)]);
     }
 
     public function index()
@@ -39,6 +105,19 @@ class ProductController extends Controller
 
         if (request()->boolean('active_only')) {
             $query->where('is_active', true);
+        }
+
+        // Opt-in filters — default behavior (every product, every type) is
+        // unchanged for existing callers (Product Management, etc).
+        if ($type = request('product_type')) {
+            $query->where('product_type', $type);
+        }
+        if ($excludeType = request('exclude_type')) {
+            // Supply/Purchasing use this to hide Compound Products — they are
+            // virtual (composed at sale time) and have no inventory to buy.
+            $query->where(function ($q) use ($excludeType) {
+                $q->where('product_type', '!=', $excludeType)->orWhereNull('product_type');
+            });
         }
 
         // Support both `per_page` (modern) and `limit` (legacy). Capped at 100

@@ -29,7 +29,6 @@ class StoreInvoiceRequest extends FormRequest
         return [
             'name'               => [ 'nullable','string', 'max:255'],
             'phone'              => [ 'nullable','string', 'max:20'],
-            'date'               => ['required', 'date'],
             'price_type'         => ['required', 'in:wholesale,retail'],
             'safe_id'            => ['nullable', 'integer', 'exists:safes,id'],
 
@@ -63,6 +62,11 @@ class StoreInvoiceRequest extends FormRequest
             // Manual per-line unit price (cashier can override the configured price).
             'items.*.price'      => ['nullable', 'numeric', 'min:0'],
 
+            // Compose-dialog tagging only (display grouping) — never affects
+            // pricing/FIFO. Both null for every normal/legacy line.
+            'items.*.parent_product_id' => ['nullable', 'integer', 'exists:products,id'],
+            'items.*.role'              => ['nullable', 'in:oil,bottle'],
+
             // Cache-based override token — set when manager has approved the request
             'override_token'     => ['nullable', 'string', 'uuid'],
         ];
@@ -75,8 +79,6 @@ class StoreInvoiceRequest extends FormRequest
             'name.max'                        => 'اسم العميل طويل جداً',
           
             'phone.max'                       => 'رقم الهاتف طويل جداً',
-            'date.required'                   => 'تاريخ الفاتورة مطلوب',
-            'date.date'                       => 'صيغة التاريخ غير صحيحة',
             'price_type.required'             => 'نوع السعر مطلوب',
             'price_type.in'                   => 'نوع السعر يجب أن يكون (جملة) أو (قطاعي)',
             'safe_id.exists'                  => 'الخزنة المحددة غير موجودة في النظام',

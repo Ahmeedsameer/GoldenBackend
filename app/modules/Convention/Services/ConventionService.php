@@ -167,7 +167,7 @@ class ConventionService
                 'amount'     => $amount,
                 'reason'     => $data['reason'],
                 'notes'      => $data['notes'] ?? null,
-                'date'       => $data['date'] ?? now()->toDateString(),
+                'date'       => now()->toDateString(),
             ]);
 
             // The low-balance alert is ONLY triggered by a manager-performed withdrawal
@@ -191,7 +191,6 @@ class ConventionService
                 'amount'     => $data['amount']     ?? null,
                 'reason'     => $data['reason']     ?? null,
                 'notes'      => $data['notes']      ?? null,
-                'date'       => $data['date']       ?? null,
             ], fn($v) => $v !== null));
 
             $this->syncLowBalanceNotification($transaction->convention->fresh());

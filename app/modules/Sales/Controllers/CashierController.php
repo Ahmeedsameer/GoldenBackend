@@ -51,6 +51,93 @@ class CashierController extends Controller
     }
 
     /**
+     * Catalog (finished/sellable) products — show_in_catalog=true with a saved
+     * recipe. Powers the new "sell a perfume" browser, separate from the
+     * generic add-item search so raw materials never surface here.
+     * GET /api/sales/catalog-products?search=Sauvage
+     */
+    public function catalogProducts()
+    {
+        $seller = auth()->user();
+        if (! $seller->shop_id) {
+            return response()->json(['message' => 'البائع غير مرتبط بأي فرع'], 422);
+        }
+        $shopId = app(\App\Modules\Hr\Services\ActiveBranchService::class)->activeBranchId($seller) ?? (int) $seller->shop_id;
+
+        return response()->json([
+            'message' => 'ok',
+            'data'    => $this->salesService->searchCatalogProducts($shopId, request('search')),
+        ]);
+    }
+
+    /**
+     * Raw materials priced as "oil" (per gram) — Product Builder Step 1.
+     * The seller is completely free to pick any of these; no predefined recipe.
+     * GET /api/sales/oil-products?search=Royal
+     */
+    public function oilProducts()
+    {
+        $seller = auth()->user();
+        if (! $seller->shop_id) {
+            return response()->json(['message' => 'البائع غير مرتبط بأي فرع'], 422);
+        }
+        $shopId = app(\App\Modules\Hr\Services\ActiveBranchService::class)->activeBranchId($seller) ?? (int) $seller->shop_id;
+
+        return response()->json([
+            'message' => 'ok',
+            'data'    => $this->salesService->searchOilProducts($shopId, request('search')),
+        ]);
+    }
+
+    /**
+     * Packaging bottles (capacity_ml required) — Product Builder Step 3.
+     * GET /api/sales/bottle-products?search=30
+     */
+    public function bottleProducts()
+    {
+        $seller = auth()->user();
+        if (! $seller->shop_id) {
+            return response()->json(['message' => 'البائع غير مرتبط بأي فرع'], 422);
+        }
+        $shopId = app(\App\Modules\Hr\Services\ActiveBranchService::class)->activeBranchId($seller) ?? (int) $seller->shop_id;
+
+        return response()->json([
+            'message' => 'ok',
+            'data'    => $this->salesService->searchBottleProducts($shopId, request('search')),
+        ]);
+    }
+
+    /**
+     * Product Builder live price calculation + bottle-capacity validation.
+     * GET /api/sales/compound-price?catalog_product_id=&oil_product_id=&oil_qty=&bottle_product_id=
+     */
+    public function compoundPrice()
+    {
+        $seller = auth()->user();
+        if (! $seller->shop_id) {
+            return response()->json(['message' => 'البائع غير مرتبط بأي فرع'], 422);
+        }
+        $shopId = app(\App\Modules\Hr\Services\ActiveBranchService::class)->activeBranchId($seller) ?? (int) $seller->shop_id;
+
+        $data = request()->validate([
+            'catalog_product_id' => ['required', 'integer', 'exists:products,id'],
+            'oil_product_id'     => ['required', 'integer', 'exists:products,id'],
+            'oil_qty'            => ['required', 'numeric', 'min:0.001'],
+            'bottle_product_id'  => ['required', 'integer', 'exists:products,id'],
+        ]);
+
+        $result = $this->salesService->calculateCompoundPrice(
+            $shopId,
+            (int) $data['catalog_product_id'],
+            (int) $data['oil_product_id'],
+            (float) $data['oil_qty'],
+            (int) $data['bottle_product_id'],
+        );
+
+        return response()->json(['message' => 'ok', 'data' => $result]);
+    }
+
+    /**
      * A product's recipe (BOM) components, resolved for the seller's shop
      * (price + unit + available stock) so the compose modal can load them.
      * GET /api/sales/products/{id}/components

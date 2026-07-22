@@ -79,7 +79,7 @@ class AuthController extends Controller
             'access_token' => $token,
             'token_type' => 'bearer',
             'role'=> auth()->user()->role,
-            'user' => auth()->user()->only('id', 'name', 'email','role'),
+            'user' => auth()->user()->only('id', 'name', 'email', 'role', 'shop_id'),
             'expires_in' => auth()->factory()->getTTL() * 60
         ]);
     }

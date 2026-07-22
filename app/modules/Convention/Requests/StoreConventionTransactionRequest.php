@@ -15,7 +15,6 @@ class StoreConventionTransactionRequest extends FormRequest
             'amount'     => ['required', 'numeric', 'min:0.01'],
             'reason'     => ['required', 'string', 'max:255'],
             'notes'      => ['nullable', 'string', 'max:1000'],
-            'date'       => ['nullable', 'date'],
         ];
     }
 
@@ -30,7 +29,6 @@ class StoreConventionTransactionRequest extends FormRequest
             'reason.required'     => 'سبب الصرف مطلوب',
             'reason.max'          => 'سبب الصرف طويل جداً',
             'notes.max'           => 'الملاحظات طويلة جداً',
-            'date.date'           => 'صيغة التاريخ غير صحيحة',
         ];
     }
 }

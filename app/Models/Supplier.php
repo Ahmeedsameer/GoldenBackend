@@ -13,6 +13,7 @@ class Supplier extends Model
     protected $fillable = [
         'name',
         'phone',
+        'notes',
     ];
 
     public function supplies(): HasMany

@@ -3,43 +3,91 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Services\Reports\ReportExportService;
+use App\Services\WarehouseResolver;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class AdminStockIntelligenceController extends Controller
 {
+    public function __construct(private ReportExportService $exportService, private WarehouseResolver $warehouse) {}
+
     private const LOW_STOCK_DEFAULT = 5;
 
+    /** GET /api/admin/stock-intelligence/export?format=pdf|excel — the full per-product inventory breakdown. */
+    public function export(Request $request)
+    {
+        $q = DB::table('goods as g')
+            ->join('supply_items as si', 'g.supply_item_id', '=', 'si.id')
+            ->join('products as p', 'si.product_id', '=', 'p.id')
+            ->leftJoin('categories as c', 'p.category_id', '=', 'c.id')
+            ->leftJoin('shops as s', 'g.shop_id', '=', 's.id')
+            ->selectRaw("
+                p.name as product_name, p.sku, COALESCE(c.name,'—') as category_name,
+                COALESCE(s.name, 'المستودع الرئيسي') as location_name,
+                SUM(g.current_quantity) as total_qty,
+                AVG(si.unit_price) as avg_price,
+                SUM(g.current_quantity * si.unit_price) as stock_value
+            ")
+            ->groupBy('p.id', 'p.name', 'p.sku', 'c.name', 's.name')
+            ->having('total_qty', '>', 0)
+            ->orderByDesc('stock_value');
+
+        $this->applyLocationFilter($request, $q);
+
+        $rows = $q->get();
+
+        $columns = ['المنتج', 'الكود', 'الفئة', 'الموقع', 'الكمية', 'متوسط السعر', 'قيمة المخزون'];
+        $tableRows = $rows->map(fn ($r) => [
+            $r->product_name, $r->sku ?? '—', $r->category_name, $r->location_name,
+            round((float) $r->total_qty, 3), round((float) $r->avg_price, 2), round((float) $r->stock_value, 2),
+        ])->all();
+
+        $filters = array_filter(['الفرع' => $request->has('shop_id')
+            ? ((int) $request->get('shop_id') === 0 ? 'المستودع الرئيسي' : \App\Models\Shop::find($request->get('shop_id'))?->name)
+            : null]);
+
+        return $request->input('format') === 'excel'
+            ? $this->exportService->excel('تقرير المخزون', $columns, $tableRows, $filters, [6, 7])
+            : $this->exportService->pdf('تقرير المخزون', $columns, $tableRows, $filters);
+    }
+
     // ── Shop-id helper ───────────────────────────────────────────────
-    // shop_id absent  → all locations
-    // shop_id = 0     → main warehouse (NULL shop_id)
-    // shop_id = N > 0 → specific shop
+    // shop_id absent            → all locations
+    // shop_id = 0 (legacy sentinel) OR the real Main Warehouse shop id → warehouse (NULL Goods.shop_id)
+    // shop_id = N               → specific shop
+    // Phase 5.2 — both the old sentinel and the real Warehouse Shop row (added in 5.0)
+    // resolve to the same NULL-shop rows via WarehouseResolver, so existing report filters
+    // work unchanged and newly-selecting the real warehouse from a shop dropdown also works.
     private function applyLocationFilter(Request $request, $query, string $col = 'g.shop_id')
     {
+        // Phase 5.5 — this endpoint is now also reachable by branch managers (for their own
+        // Branch Dashboard). A manager is always scoped to their own shop, ignoring whatever
+        // shop_id was passed, so they can never read another branch's stock via this filter.
+        $user = $request->user();
+        if ($user && $user->role === 'manager' && $user->shop_id) {
+            $request->merge(['shop_id' => $user->shop_id]);
+        }
+
         if ($request->has('shop_id')) {
             $sid = (int) $request->get('shop_id');
-            if ($sid === 0) {
+            $goodsShopId = $sid === 0 ? null : $this->warehouse->goodsShopId($sid);
+            if ($goodsShopId === null) {
                 $query->whereNull($col);
             } else {
-                $query->where($col, $sid);
+                $query->where($col, $goodsShopId);
             }
         }
         return $query;
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // GET /api/admin/stock-intelligence/overview
-    // System-wide KPIs + per-location summary
-    // ════════════════════════════════════════════════════════════════
-    public function overview(Request $request)
+    // Aggregate (product × location) totals in one pass — shared by overview()
+    // and inventoryDashboard(). loc_value = actual batch cost (FIFO);
+    // loc_cost = product purchase_cost (fallback batch cost); loc_selling =
+    // product selling_price (fallback category minimum).
+    private function stockCombos()
     {
-        $threshold = max(1, (int) $request->get('threshold', self::LOW_STOCK_DEFAULT));
-
-        // Aggregate (product × location) totals in one pass.
-        // loc_value  = actual batch cost (FIFO);
-        // loc_cost   = product purchase_cost (fallback batch cost);
-        // loc_selling= product selling_price (fallback category minimum).
-        $combos = DB::table('goods as g')
+        return DB::table('goods as g')
             ->join('supply_items as si', 'g.supply_item_id', '=', 'si.id')
             ->join('products as p',       'si.product_id',   '=', 'p.id')
             ->leftJoin('categories as c', 'p.category_id',   '=', 'c.id')
@@ -50,6 +98,54 @@ class AdminStockIntelligenceController extends Controller
                 SUM(g.current_quantity * COALESCE(p.selling_price, c.minimum_sell_price, 0)) as loc_selling')
             ->groupBy('si.product_id', 'g.shop_id')
             ->get();
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // GET /api/admin/stock-intelligence/dashboard
+    // The main Inventory Dashboard — product-type counts + KPI cards.
+    // ════════════════════════════════════════════════════════════════
+    public function dashboard(Request $request)
+    {
+        $threshold = max(1, (int) $request->get('threshold', self::LOW_STOCK_DEFAULT));
+        $combos    = $this->stockCombos();
+        $active    = $combos->where('loc_qty', '>', 0);
+
+        $typeCounts = \App\Models\Product::query()
+            ->where('is_active', true)
+            ->whereIn('product_type', [
+                \App\Models\Product::TYPE_RAW_MATERIAL,
+                \App\Models\Product::TYPE_PACKAGING,
+                \App\Models\Product::TYPE_READY_PRODUCT,
+                \App\Models\Product::TYPE_COMPOUND,
+            ])
+            ->selectRaw('product_type, COUNT(*) as c')
+            ->groupBy('product_type')
+            ->pluck('c', 'product_type');
+
+        return response()->json([
+            'message' => 'ok',
+            'data' => [
+                'raw_material_count'   => (int) ($typeCounts[\App\Models\Product::TYPE_RAW_MATERIAL] ?? 0),
+                'packaging_count'      => (int) ($typeCounts[\App\Models\Product::TYPE_PACKAGING] ?? 0),
+                'ready_product_count'  => (int) ($typeCounts[\App\Models\Product::TYPE_READY_PRODUCT] ?? 0),
+                'compound_count'       => (int) ($typeCounts[\App\Models\Product::TYPE_COMPOUND] ?? 0),
+                'total_inventory_value' => round((float) $active->sum('loc_cost'), 2),
+                'low_stock_count'      => $active->where('loc_qty', '<=', $threshold)->count(),
+                'out_of_stock_count'   => $combos->where('loc_qty', '<=', 0)->count(),
+                'expiring_soon_count'  => null, // no expiry-date tracking yet — reserved for future support
+                'threshold'            => $threshold,
+            ],
+        ]);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // GET /api/admin/stock-intelligence/overview
+    // System-wide KPIs + per-location summary
+    // ════════════════════════════════════════════════════════════════
+    public function overview(Request $request)
+    {
+        $threshold = max(1, (int) $request->get('threshold', self::LOW_STOCK_DEFAULT));
+        $combos    = $this->stockCombos();
 
         $active   = $combos->where('loc_qty', '>', 0);
         $depleted = $combos->where('loc_qty', '<=', 0);

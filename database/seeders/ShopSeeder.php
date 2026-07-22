@@ -20,6 +20,20 @@ class ShopSeeder extends Seeder
 
         $manager1 = User::where('email', 'manager1@alpha.com')->first();
         $manager2 = User::where('email', 'manager2@alpha.com')->first();
+        $admin = User::where('role', 'admin')->first();
+
+        // ── Main Warehouse — a real Shop row (Phase 5.1/5.2) so Transfers,
+        // Reports, Dashboards and Invoices need zero special-casing for it.
+        // Goods.shop_id = NULL still means "physically in the warehouse" —
+        // WarehouseResolver bridges this Shop's id to that NULL convention
+        // inside the inventory layer only. Admin acts as its manager.
+        Shop::create([
+            'name'         => 'المستودع الرئيسي',
+            'address'      => 'المستودع المركزي',
+            'status'       => 'active',
+            'manager_id'   => $admin?->id,
+            'is_warehouse' => true,
+        ]);
 
         // ── Shop 1: Main Branch ───────────────────────────────────────────────
         $shop1 = Shop::create([

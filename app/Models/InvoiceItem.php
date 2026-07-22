@@ -10,6 +10,8 @@ class InvoiceItem extends Model
     protected $fillable = [
         'invoice_id',
         'product_id',
+        'parent_product_id',
+        'role',
         'goods_id',
         'quantity',
         'price',
@@ -28,6 +30,12 @@ class InvoiceItem extends Model
     public function product(): BelongsTo
     {
         return $this->belongsTo(Product::class);
+    }
+
+    /** The catalog product this component line was sold under, if any (compose flow). */
+    public function parentProduct(): BelongsTo
+    {
+        return $this->belongsTo(Product::class, 'parent_product_id');
     }
 
     public function goods(): BelongsTo

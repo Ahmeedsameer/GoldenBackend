@@ -2,6 +2,9 @@
 
 use App\Http\Controllers\Admin\AdminSalesReportController;
 use App\Http\Controllers\Admin\AdminFinancialReportController;
+use App\Http\Controllers\Admin\AdminPerfumeReportController;
+use App\Http\Controllers\Admin\AdminBranchComparisonController;
+use App\Http\Controllers\Admin\AdminMonthlyProfitController;
 use App\Http\Controllers\Admin\AdminDashboardController;
 use App\Http\Controllers\Admin\AdminStockIntelligenceController;
 use App\Http\Controllers\Admin\ShopController;
@@ -23,6 +26,21 @@ use App\Modules\Convention\Controllers\ConventionController;
 use App\Modules\Convention\Controllers\ConventionTransactionController;
 use App\Modules\Convention\Controllers\ManagerConventionController;
 use App\Modules\Convention\Controllers\NotificationController;
+use App\Modules\Pricing\Controllers\PricingController;
+use App\Modules\BranchOperations\Controllers\TransferRequestController;
+use App\Modules\BranchOperations\Controllers\WasteController;
+use App\Modules\BranchOperations\Controllers\InventoryAdjustmentController;
+use App\Modules\BranchOperations\Controllers\InventoryCountController;
+use App\Modules\BranchOperations\Controllers\BranchDashboardController;
+use App\Modules\BranchOperations\Controllers\AdminLogisticsDashboardController;
+use App\Modules\BranchOperations\Controllers\InternalTransferInvoiceController;
+use App\Modules\BranchOperations\Controllers\TransferReportController;
+use App\Modules\BranchOperations\Controllers\WasteReportController;
+use App\Modules\BranchOperations\Controllers\InventoryCountReportController;
+use App\Modules\BranchOperations\Controllers\InventoryAdjustmentReportController;
+use App\Modules\BranchOperations\Controllers\StockMovementReportController;
+use App\Modules\BranchOperations\Controllers\BatchTraceabilityController;
+use App\Modules\BranchOperations\Controllers\InventoryAuditReportController;
 use App\Modules\Sales\Controllers\CashierController;
 use App\Modules\Sales\Controllers\InvoiceController;
 use App\Modules\Sales\Controllers\ManagerOverrideController;
@@ -98,8 +116,9 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
     });
 
     // ── Products ─────────────────────────────────────────────────────────────
+    // Listing itself is registered outside this admin-only group — see below —
+    // since branch managers also need to read the product catalog for transfers.
     Route::group(['prefix' => 'products'], function () {
-        Route::get('',        [ProductController::class, 'index']);
         Route::post('',       [ProductController::class, 'store']);
         Route::get('{id}',    [ProductController::class, 'show']);
         Route::put('{id}',    [ProductController::class, 'update']);
@@ -107,13 +126,21 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         // BOM / recipe (components of a composed product)
         Route::get('{id}/components', [\App\Http\Controllers\ProductComponentController::class, 'index']);
         Route::put('{id}/components', [\App\Http\Controllers\ProductComponentController::class, 'sync']);
+
+        // Product Details page
+        Route::get('{id}/detail',           [ProductController::class, 'detail']);
+        Route::get('{id}/purchase-history', [ProductController::class, 'purchaseHistory']);
+        Route::get('{id}/purchase-history/export', [ProductController::class, 'exportPurchaseHistory']);
+        Route::get('{id}/movements',        [ProductController::class, 'movements']);
+        Route::get('{id}/supplier-history', [ProductController::class, 'supplierHistory']);
+        Route::get('{id}/analytics',        [ProductController::class, 'analytics']);
     });
 
     // ── Shops ─────────────────────────────────────────────────────────────────
     Route::group(['prefix' => 'shops'], function () {
 
-        // CRUD
-        Route::get('',                          [ShopController::class, 'index']);
+        // CRUD (listing itself is registered outside this admin-only group — see below —
+        // since branch managers also need to read shop names for transfer creation/filters).
         Route::post('create',                   [ShopController::class, 'store']);
         Route::get('show/{id}',                 [ShopController::class, 'show']);
         Route::put('update/{id}',               [ShopController::class, 'update']);
@@ -140,7 +167,15 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::put('suppliers/update/{id}',     [SupplierController::class, 'update']);
         Route::delete('suppliers/destroy/{id}', [SupplierController::class, 'destroy']);
 
+        // Supplier Profile page
+        Route::get('suppliers/insights',            [SupplierController::class, 'insights']);
+        Route::get('suppliers/{id}/profile',           [SupplierController::class, 'profile']);
+        Route::get('suppliers/{id}/profile/products',  [SupplierController::class, 'profileProducts']);
+        Route::get('suppliers/{id}/profile/analytics', [SupplierController::class, 'profileAnalytics']);
+        Route::get('suppliers/{id}/profile/export',    [SupplierController::class, 'exportProfile']);
+
         // Supplies
+        Route::get('supplier-intelligence',     [SupplyController::class, 'supplierIntelligence']);
         Route::get('supplies',                  [SupplyController::class, 'index']);
         Route::post('supplies/create',          [SupplyController::class, 'store']);
         Route::get('supplies/show/{id}',        [SupplyController::class, 'show']);
@@ -194,6 +229,7 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::get('customers',   [AdminSalesReportController::class, 'customers']);
         Route::get('hourly',      [AdminSalesReportController::class, 'hourly']);
         Route::get('invoices',    [AdminSalesReportController::class, 'invoices']);
+        Route::get('export',     [AdminSalesReportController::class, 'export']);
     });
 
     // ── Financial Reports (admin: cross-shop) ────────────────────────────────────
@@ -203,14 +239,34 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::get('by-shop',      [AdminFinancialReportController::class, 'byShop']);
         Route::get('balances',     [AdminFinancialReportController::class, 'balances']);
         Route::get('transactions', [AdminFinancialReportController::class, 'transactions']);
+        Route::get('export',       [AdminFinancialReportController::class, 'export']);
+    });
+
+    // ── Perfume Composition Reports — real oil/bottle usage across Compound sales ─
+    Route::group(['prefix' => 'admin/reports/perfume'], function () {
+        Route::get('summary', [AdminPerfumeReportController::class, 'summary']);
+        Route::get('trend',   [AdminPerfumeReportController::class, 'trend']);
+        Route::get('export',  [AdminPerfumeReportController::class, 'export']);
+    });
+
+    // ── Branch Comparison — revenue/profit/top seller/top oil-bottle per shop ────
+    Route::group(['prefix' => 'admin/reports/branch-comparison'], function () {
+        Route::get('', [AdminBranchComparisonController::class, 'compare']);
+        Route::get('export', [AdminBranchComparisonController::class, 'export']);
+    });
+
+    // ── Monthly Profit — revenue vs. estimated cost trend ────────────────────────
+    Route::group(['prefix' => 'admin/reports/monthly-profit'], function () {
+        Route::get('', [AdminMonthlyProfitController::class, 'trend']);
+        Route::get('export', [AdminMonthlyProfitController::class, 'export']);
     });
 
     // ── Stock Intelligence (admin: cross-shop) ───────────────────────────────────
     Route::group(['prefix' => 'admin/stock-intelligence'], function () {
-        Route::get('overview',  [AdminStockIntelligenceController::class, 'overview']);
+        Route::get('dashboard', [AdminStockIntelligenceController::class, 'dashboard']);
         Route::get('inventory', [AdminStockIntelligenceController::class, 'inventory']);
-        Route::get('low-stock', [AdminStockIntelligenceController::class, 'lowStock']);
         Route::get('supplies',  [AdminStockIntelligenceController::class, 'supplies']);
+        Route::get('export',    [AdminStockIntelligenceController::class, 'export']);
     });
 
     // ── Conventions / Cash Advance (عهدة) ──────────────────────────────────────
@@ -343,6 +399,171 @@ Route::group(['middleware' => ['api', CheckRole::class . ':manager'], 'prefix' =
 });
 
 
+// ─── Pricing Management ─────────────────────────────────────────────────────────
+// Sells always read Product.selling_price / default_selling_price — Pricing is
+// the only place those change. Purchasing/FIFO never touch them (see
+// PricingService::applyPriceUpdate, which updates cost only).
+
+// View-only for admin + manager (current prices/cost/profit — NOT history).
+Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'prefix' => 'pricing'], function () {
+    Route::get('',              [PricingController::class, 'index']);
+    Route::get('export',        [PricingController::class, 'export']);
+    Route::get('{id}',          [PricingController::class, 'show']);
+});
+
+// Admin-only: price history, refreshing costs, and changing selling prices.
+Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'pricing'], function () {
+    Route::get('{id}/history',          [PricingController::class, 'history']);
+    Route::get('update/preview',        [PricingController::class, 'updatePreview']);
+    Route::post('update/apply',         [PricingController::class, 'applyUpdate']);
+    Route::put('{id}/selling-price',    [PricingController::class, 'updateSellingPrice']);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Branch Operations & Logistics — Phase 5.1 permission model (manager-driven):
+//   Admin        — observes everything, is the Warehouse's manager, can
+//                  cancel/override any transfer, creates Emergency Transfers.
+//   Branch Manager (manager) — creates requests; approves/rejects/ships as
+//                  the SOURCE (owning) shop's manager; receives as the
+//                  DESTINATION shop's manager. Inventory ownership decides
+//                  authority, not who requested — enforced per-shop in
+//                  TransferRequestController::assertActsForShop(), not by role alone.
+//   Employee (sales) — read-only, own shop only. Never approve/override.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Shop listing (read-only) — branch managers need shop names for transfer creation/filters, unlike the admin-only Shop CRUD above ──
+Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'prefix' => 'shops'], function () {
+    Route::get('', [ShopController::class, 'index']);
+});
+
+// ── Product listing (read-only) — branch managers need the product catalog to pick
+// items when creating a Transfer Request, unlike the admin-only Product CRUD above ──
+Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'prefix' => 'products'], function () {
+    Route::get('', [ProductController::class, 'index']);
+});
+
+// ── Stock Intelligence overview/low-stock (read-only) — branch managers need their own
+// branch's data for the Branch Dashboard; applyLocationFilter forces a manager to their own shop_id ──
+Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'prefix' => 'admin/stock-intelligence'], function () {
+    Route::get('overview',  [AdminStockIntelligenceController::class, 'overview']);
+    Route::get('low-stock', [AdminStockIntelligenceController::class, 'lowStock']);
+});
+
+// ── Transfer Requests — read: all roles (shop-scoped); every write action is admin+manager, with per-shop ownership enforced inside the controller ──
+Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager,sales'], 'prefix' => 'branch-operations/transfers'], function () {
+    Route::get('',                  [TransferRequestController::class, 'index']);
+    Route::get('available-stock',   [TransferRequestController::class, 'availableStock']);
+    Route::get('{id}/invoice/pdf',  [InternalTransferInvoiceController::class, 'pdf']);
+    Route::get('{id}',              [TransferRequestController::class, 'show']);
+});
+Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'prefix' => 'branch-operations/transfers'], function () {
+    Route::post('',                 [TransferRequestController::class, 'store']);
+    Route::post('{id}/submit',      [TransferRequestController::class, 'submit']);
+    Route::post('{id}/approve',     [TransferRequestController::class, 'approve']); // source-shop manager (or admin for the warehouse)
+    Route::post('{id}/reject',      [TransferRequestController::class, 'reject']); // source-shop manager (or admin for the warehouse)
+    Route::post('{id}/prepare',     [TransferRequestController::class, 'prepare']); // source-shop manager (or admin for the warehouse)
+    Route::post('{id}/ship',        [TransferRequestController::class, 'ship']); // source-shop manager (or admin for the warehouse)
+    Route::post('{id}/receive',     [TransferRequestController::class, 'receive']); // destination-shop manager (or admin for the warehouse)
+    Route::post('{id}/close',       [TransferRequestController::class, 'close']); // either side's manager, or admin
+});
+Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'branch-operations/transfers'], function () {
+    Route::post('{id}/cancel',      [TransferRequestController::class, 'cancel']);
+});
+
+// ── Waste Management (Part 7) — read: all roles (shop-scoped); register: admin+manager ──
+Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager,sales'], 'prefix' => 'branch-operations/waste'], function () {
+    Route::get('',   [WasteController::class, 'index']);
+});
+Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'prefix' => 'branch-operations/waste'], function () {
+    Route::post('',  [WasteController::class, 'store']);
+});
+
+// ── Inventory Adjustments (Part 9) — Manager Dashboard Cleanup: admin only, no longer accessible to managers/sales ──
+Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'branch-operations/adjustments'], function () {
+    Route::get('',   [InventoryAdjustmentController::class, 'index']);
+    Route::post('',  [InventoryAdjustmentController::class, 'store']);
+    Route::post('{id}/approve', [InventoryAdjustmentController::class, 'approve']);
+    Route::post('{id}/reject',  [InventoryAdjustmentController::class, 'reject']);
+    Route::post('{id}/execute', [InventoryAdjustmentController::class, 'execute']);
+});
+
+// ── Inventory Count Sessions (Part 8) — Manager Dashboard Cleanup: admin only, no longer accessible to managers/sales ──
+Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'branch-operations/counts'], function () {
+    Route::get('',                    [InventoryCountController::class, 'index']);
+    Route::get('{id}',                [InventoryCountController::class, 'show']);
+    Route::post('',                   [InventoryCountController::class, 'store']);
+    Route::post('{id}/record',        [InventoryCountController::class, 'recordCounts']);
+    Route::post('{id}/submit-review', [InventoryCountController::class, 'submitForReview']);
+    Route::put('{id}/items/{itemId}/reason', [InventoryCountController::class, 'setItemReason']);
+    Route::post('{id}/approve',          [InventoryCountController::class, 'approve']);
+    Route::post('{id}/adjust-inventory', [InventoryCountController::class, 'adjustInventory']);
+});
+
+// ── Branch Operations Dashboard (Phase 4, Part 10) — admin + manager, shop-scoped ──
+Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'prefix' => 'branch-operations/dashboard'], function () {
+    Route::get('', [BranchDashboardController::class, 'show']);
+});
+
+// ── Admin Logistics Dashboard (Phase 4, Part 11) — admin only, cross-branch ──
+Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'branch-operations/logistics-dashboard'], function () {
+    Route::get('', [AdminLogisticsDashboardController::class, 'overview']);
+});
+
+// ── Transfer Reports (Phase 4.7) — admin only, cross-branch ──────────────────
+Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'branch-operations/reports/transfers'], function () {
+    Route::get('summary', [TransferReportController::class, 'summary']);
+    Route::get('{type}/export', [TransferReportController::class, 'export']);
+    Route::get('{type}', [TransferReportController::class, 'data']);
+});
+
+// ── Internal Transfer Invoice dedicated report (Phase 5.8) — admin only ──────
+Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'branch-operations/reports/transfer-invoices'], function () {
+    Route::get('export', [TransferReportController::class, 'invoiceReportExport']);
+    Route::get('', [TransferReportController::class, 'invoiceReportData']);
+});
+
+// ── Waste Reports (Phase 4.8) — admin only, cross-branch ─────────────────────
+Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'branch-operations/reports/waste'], function () {
+    Route::get('summary', [WasteReportController::class, 'summary']);
+    Route::get('{type}/export', [WasteReportController::class, 'export']);
+    Route::get('{type}', [WasteReportController::class, 'data']);
+});
+
+// ── Inventory Count Reports (Phase 4.9) — admin only, cross-branch ───────────
+Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'branch-operations/reports/counts'], function () {
+    Route::get('summary', [InventoryCountReportController::class, 'summary']);
+    Route::get('{type}/export', [InventoryCountReportController::class, 'export']);
+    Route::get('{type}', [InventoryCountReportController::class, 'data']);
+});
+
+// ── Inventory Adjustment Reports (Phase 4.10) — admin only, cross-branch ─────
+Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'branch-operations/reports/adjustments'], function () {
+    Route::get('summary', [InventoryAdjustmentReportController::class, 'summary']);
+    Route::get('{type}/export', [InventoryAdjustmentReportController::class, 'export']);
+    Route::get('{type}', [InventoryAdjustmentReportController::class, 'data']);
+});
+
+// ── Stock Movement Report (Phase 4.11) — admin only, cross-branch ────────────
+Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'branch-operations/reports/stock-movement'], function () {
+    Route::get('export', [StockMovementReportController::class, 'export']);
+    Route::get('', [StockMovementReportController::class, 'data']);
+});
+
+// ── FIFO / Batch Traceability (Phase 4.13) — admin only, cross-branch ────────
+Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'branch-operations/reports/batches'], function () {
+    Route::get('summary', [BatchTraceabilityController::class, 'summary']);
+    Route::get('export', [BatchTraceabilityController::class, 'export']);
+    Route::get('{supplyItem}', [BatchTraceabilityController::class, 'show']);
+    Route::get('', [BatchTraceabilityController::class, 'index']);
+});
+
+// ── Inventory Audit Report (Phase 4.14) — admin only, cross-branch ───────────
+Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'branch-operations/reports/inventory-audit'], function () {
+    Route::get('export', [InventoryAuditReportController::class, 'export']);
+    Route::get('', [InventoryAuditReportController::class, 'data']);
+});
+
+
 // ─── Seller (Cashier) — managers may sell exactly like sellers ─────────────────
 
 Route::group(['middleware' => ['api', CheckRole::class . ':sales,manager']], function () {
@@ -353,6 +574,10 @@ Route::group(['middleware' => ['api', CheckRole::class . ':sales,manager']], fun
         Route::get('goods',       [CashierController::class, 'searchGoods']);
         Route::get('unstocked-products', [CashierController::class, 'unstockedProducts']);
         Route::get('composable-products', [CashierController::class, 'composableProducts']);
+        Route::get('catalog-products', [CashierController::class, 'catalogProducts']);
+        Route::get('oil-products', [CashierController::class, 'oilProducts']);
+        Route::get('bottle-products', [CashierController::class, 'bottleProducts']);
+        Route::get('compound-price', [CashierController::class, 'compoundPrice']);
         Route::get('products/{id}/components', [CashierController::class, 'productComponents']);
         Route::get('categories',  [CashierController::class, 'getCategories']);
         Route::get('customers',   [CashierController::class, 'searchCustomers']);

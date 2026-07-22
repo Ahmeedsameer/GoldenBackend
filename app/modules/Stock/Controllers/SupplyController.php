@@ -37,6 +37,19 @@ class SupplyController extends Controller
         ]);
     }
 
+    /** GET /api/stock/supplier-intelligence?product_type=RAW_MATERIAL */
+    public function supplierIntelligence()
+    {
+        $productType = request()->validate([
+            'product_type' => 'required|string|in:RAW_MATERIAL,PACKAGING,READY_PRODUCT',
+        ])['product_type'];
+
+        return response()->json([
+            'message' => 'ok',
+            'data' => $this->supplyService->supplierIntelligence($productType),
+        ]);
+    }
+
     public function store(StoreSupplyRequest $request)
     {
         $supply = $this->supplyService->create($request->validated());

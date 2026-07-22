@@ -2,7 +2,9 @@
 
 namespace App\Http\Requests;
 
+use App\Models\Product;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class UpdateProductRequest extends FormRequest
 {
@@ -27,6 +29,7 @@ class UpdateProductRequest extends FormRequest
             'sku' => 'sometimes|required|string|max:100|unique:products,sku,' . $this->route('id'),
             'barcode' => 'sometimes|nullable|string|max:100',
             'description' => 'sometimes|nullable|string',
+            'notes'       => 'sometimes|nullable|string',
             'is_active' => 'sometimes|in:true,false,1,0',
             'scalar' => 'sometimes|required|in:kg,g,l,ml,pcs',
             'category_id' => 'sometimes|required|exists:categories,id',
@@ -36,6 +39,9 @@ class UpdateProductRequest extends FormRequest
             'purchase_cost'     => 'sometimes|nullable|numeric|min:0',
             'warning_quantity'  => 'sometimes|nullable|numeric|min:0',
             'critical_quantity' => 'sometimes|nullable|numeric|min:0|lte:warning_quantity',
+            'product_type'      => ['sometimes', 'nullable', Rule::in(Product::PRODUCT_TYPES)],
+            'show_in_catalog'   => 'sometimes|nullable|in:true,false,1,0',
+            'capacity_ml'       => 'sometimes|nullable|numeric|min:0',
         ];
     }
 

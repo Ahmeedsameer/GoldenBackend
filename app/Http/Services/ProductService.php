@@ -20,6 +20,9 @@ class ProductService{
         }
         $data['image'] = $imagePath;
         $data['is_active'] = ($data['is_active'] === 'true' || $data['is_active'] === '1') ? true : false;
+        if (isset($data['show_in_catalog'])) {
+            $data['show_in_catalog'] = in_array($data['show_in_catalog'], ['true', '1', 1, true], true);
+        }
 
         // SKU is auto-generated when the admin doesn't provide one — products are
         // found by barcode + name, so no manual SKU entry is required.
@@ -121,6 +124,9 @@ class ProductService{
                 $data['image'] = $imagePath;
             }
             $data['is_active'] = ($data['is_active'] === 'true' || $data['is_active'] === '1') ? true : false;
+            if (isset($data['show_in_catalog'])) {
+                $data['show_in_catalog'] = in_array($data['show_in_catalog'], ['true', '1', 1, true], true);
+            }
 
             // Keep Product-Type-driven rules consistent on update too. Uses the
             // incoming category_id when changed, else the product's current one.

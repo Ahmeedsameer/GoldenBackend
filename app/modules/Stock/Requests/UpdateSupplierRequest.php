@@ -18,6 +18,7 @@ class UpdateSupplierRequest extends FormRequest
         return [
             'name'  => 'sometimes|required|string|max:255',
             'phone' => 'sometimes|required|string|max:20|unique:suppliers,phone,' . $supplierId,
+            'notes' => 'nullable|string',
         ];
     }
 

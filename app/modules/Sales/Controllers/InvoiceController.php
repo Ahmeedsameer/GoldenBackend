@@ -42,6 +42,7 @@ class InvoiceController extends Controller
             'seller:id,name',
             'shop:id,name',
             'items.product:id,name,sku,scalar',
+            'items.parentProduct:id,name',
             'items.goods',
             'payments.currency:id,code,symbol',
         ])->where('seller_id', auth()->id())->findOrFail($id);

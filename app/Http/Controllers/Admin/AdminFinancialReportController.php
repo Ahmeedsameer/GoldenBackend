@@ -5,17 +5,49 @@ namespace App\Http\Controllers\Admin;
 use App\Http\Controllers\Controller;
 use App\Models\Safe;
 use App\Models\SafeTransaction;
+use App\Services\Reports\ReportExportService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class AdminFinancialReportController extends Controller
 {
+    public function __construct(private ReportExportService $exportService) {}
+
     // Real economic flows — internal transfers are excluded from all P&L calcs
     private const REAL_TYPES = [
         'sale', 'refund',
         'admin_deposit', 'admin_withdrawal',
         'manager_deposit', 'manager_expense',
     ];
+
+    /** GET /api/admin/reports/financial/export?format=pdf|excel — the safe-transaction ledger for the period. */
+    public function export(Request $request)
+    {
+        [$from, $to] = $this->parseDates($request);
+
+        $q = SafeTransaction::with(['safe.shop:id,name', 'currency:id,name,symbol', 'reason:id,name', 'user:id,name'])
+            ->whereBetween(DB::raw('DATE(created_at)'), [$from, $to]);
+
+        if ($request->filled('shop_id')) {
+            $shopId = (int) $request->get('shop_id');
+            $q->whereHas('safe', fn ($sq) => $sq->where('shop_id', $shopId));
+        }
+        if ($request->filled('type')) { $q->where('type', $request->get('type')); }
+
+        $transactions = $q->orderByDesc('created_at')->get();
+
+        $columns = ['التاريخ', 'الفرع', 'النوع', 'الاتجاه', 'العملة', 'المبلغ', 'السبب', 'المستخدم'];
+        $rows = $transactions->map(fn ($tx) => [
+            $tx->created_at?->toDateTimeString(), $tx->safe?->shop?->name ?? '—', $tx->type, $tx->direction,
+            $tx->currency?->name ?? '—', round((float) $tx->amount, 2), $tx->reason?->name ?? '—', $tx->user?->name ?? '—',
+        ])->all();
+
+        $filters = array_filter(['من' => $from, 'إلى' => $to]);
+
+        return $request->input('format') === 'excel'
+            ? $this->exportService->excel('التقرير المالي', $columns, $rows, $filters, [5])
+            : $this->exportService->pdf('التقرير المالي', $columns, $rows, $filters);
+    }
 
     // ── Date range resolver ──────────────────────────────────────────
     private function parseDates(Request $request): array

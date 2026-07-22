@@ -37,6 +37,63 @@ class SupplyService
         return $query->latest()->paginate($perPage);
     }
 
+    /**
+     * Supplier analytics for a single product type — helps the user pick the
+     * right supplier while creating a supply. Read-only, no writes.
+     */
+    public function supplierIntelligence(string $productType): array
+    {
+        $base = fn () => DB::table('supply_items as si')
+            ->join('supplies as s', 's.id', '=', 'si.supply_id')
+            ->join('products as p', 'p.id', '=', 'si.product_id')
+            ->where('p.product_type', $productType);
+
+        $topSuppliers = $base()
+            ->join('suppliers as sup', 'sup.id', '=', 's.supplier_id')
+            ->selectRaw('sup.id, sup.name, COUNT(*) as purchase_count, SUM(si.quantity * si.unit_price) as total_spent')
+            ->groupBy('sup.id', 'sup.name')
+            ->orderByDesc('total_spent')
+            ->limit(5)
+            ->get();
+
+        $mostFrequentSupplier = $base()
+            ->join('suppliers as sup', 'sup.id', '=', 's.supplier_id')
+            ->selectRaw('sup.id, sup.name, COUNT(*) as purchase_count')
+            ->groupBy('sup.id', 'sup.name')
+            ->orderByDesc('purchase_count')
+            ->first();
+
+        $mostPurchasedProducts = DB::table('supply_items as si')
+            ->join('products as p', 'p.id', '=', 'si.product_id')
+            ->where('p.product_type', $productType)
+            ->selectRaw('p.id, p.name, SUM(si.quantity) as total_qty, COUNT(*) as purchase_count')
+            ->groupBy('p.id', 'p.name')
+            ->orderByDesc('total_qty')
+            ->limit(5)
+            ->get();
+
+        $totals = $base()->selectRaw('SUM(si.quantity * si.unit_price) as total_cost, SUM(si.quantity) as total_qty, COUNT(*) as purchase_count')->first();
+        $averagePrice = ($totals && (float) $totals->total_qty > 0)
+            ? round((float) $totals->total_cost / (float) $totals->total_qty, 2)
+            : null;
+
+        $latest = $base()
+            ->orderByDesc('s.date')
+            ->orderByDesc('si.id')
+            ->select('si.unit_price', 'p.name as product_name', 's.date')
+            ->first();
+
+        return [
+            'top_suppliers' => $topSuppliers,
+            'most_purchased_products' => $mostPurchasedProducts,
+            'average_purchase_price' => $averagePrice,
+            'latest_purchase_price' => $latest?->unit_price !== null ? (float) $latest->unit_price : null,
+            'latest_purchase_product' => $latest?->product_name,
+            'most_frequent_supplier' => $mostFrequentSupplier,
+            'purchase_count' => (int) ($totals->purchase_count ?? 0),
+        ];
+    }
+
     public function findOrFail(int $id): Supply
     {
         return Supply::with([
@@ -52,10 +109,11 @@ class SupplyService
     public function create(array $data): Supply
     {
         $supply = DB::transaction(function () use ($data) {
-            // 1. إنشاء سجل التوريد
+            // 1. إنشاء سجل التوريد — التاريخ يُولَّد دائماً من الخادم (لا يُدخله المستخدم)
+            $today = now()->toDateString();
             $supply = Supply::create([
                 'supplier_id'    => $data['supplier_id'],
-                'date'           => $data['date'],
+                'date'           => $today,
                 'payment_method' => $data['payment_method'],
             ]);
 
@@ -73,7 +131,7 @@ class SupplyService
                     'supply_item_id'   => $supplyItem->id,
                     'shop_id'          => null,
                     'current_quantity' => $item['quantity'],
-                    'date'             => $data['date'],
+                    'date'             => $today,
                 ]);
             }
 

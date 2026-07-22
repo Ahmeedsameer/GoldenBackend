@@ -6,11 +6,45 @@ use App\Http\Controllers\Controller;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
 use App\Models\Shop;
+use App\Services\Reports\ReportExportService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class AdminSalesReportController extends Controller
 {
+    public function __construct(private ReportExportService $exportService) {}
+
+    /** GET /api/admin/reports/sales/export?format=pdf|excel — the full invoice list for the selected period/filters. */
+    public function export(Request $request)
+    {
+        [$from, $to] = $this->parseDates($request);
+
+        $q = Invoice::with(['shop:id,name', 'seller:id,name', 'customer:id,name,phone'])
+            ->withCount('items')
+            ->whereBetween('date', [$from, $to]);
+
+        if ($request->filled('shop_id'))   { $q->where('shop_id', (int) $request->get('shop_id')); }
+        if ($request->filled('seller_id')) { $q->where('seller_id', (int) $request->get('seller_id')); }
+        if ($request->filled('status'))    { $q->where('status', $request->get('status')); }
+
+        $invoices = $q->orderByDesc('date')->orderByDesc('id')->get();
+
+        $columns = ['رقم الفاتورة', 'التاريخ', 'الفرع', 'البائع', 'العميل', 'عدد الأصناف', 'الإجمالي', 'الحالة'];
+        $rows = $invoices->map(fn ($inv) => [
+            $inv->id, $inv->date?->toDateString(), $inv->shop?->name ?? '—', $inv->seller?->name ?? '—',
+            $inv->customer?->name ?? 'زبون عابر', $inv->items_count, round((float) $inv->total_amount, 2), $inv->status,
+        ])->all();
+
+        $filters = array_filter([
+            'من' => $from, 'إلى' => $to,
+            'الفرع' => $request->filled('shop_id') ? Shop::find($request->get('shop_id'))?->name : null,
+        ]);
+
+        return $request->input('format') === 'excel'
+            ? $this->exportService->excel('تقرير المبيعات', $columns, $rows, $filters, [6])
+            : $this->exportService->pdf('تقرير المبيعات', $columns, $rows, $filters);
+    }
+
     // ── Date range resolver ──────────────────────────────────────────
     private function parseDates(Request $request): array
     {

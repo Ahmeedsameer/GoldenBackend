@@ -21,6 +21,7 @@ class Shop extends Model
         'password',
         'status',
         'manager_id',
+        'is_warehouse',
     ];
 
     protected $hidden = [
@@ -31,6 +32,7 @@ class Shop extends Model
         'password'             => 'hashed',
         'status'               => 'string',
         'branch_bonus_percent' => 'decimal:2',
+        'is_warehouse'         => 'boolean',
     ];
 
     // الموظفون المنتسبون للفرع (علاقة واحد لمتعدد)

@@ -252,6 +252,23 @@ class SalesService
                 ->get()
                 ->keyBy('id');
 
+            // ── 2a. Pricing guard — a Ready Product that has been purchased
+            //     must have a selling price configured in Pricing Management
+            //     before it can be sold; Purchasing/Supply never sets this.
+            //     Compound Products are exempt (price entered fresh every
+            //     sale in the Product Builder), as are oil/bottle
+            //     sub-component lines (role !== null) whose price comes from
+            //     the Builder's own reference cost, not a stored price. ────
+            foreach ($data['items'] as $item) {
+                if (! empty($item['role'])) {
+                    continue;
+                }
+                $product = $products[$item['product_id']] ?? null;
+                if ($product && $product->product_type === Product::TYPE_READY_PRODUCT && $product->selling_price === null) {
+                    abort(422, "المنتج \"{$product->name}\" ليس له سعر بيع محدد — يجب إكمال إدارة الأسعار أولاً.");
+                }
+            }
+
             // ── 2b. Stock guard — never sell more than what is in this shop ──
             // Sum the requested quantity per product (an item may span rows),
             // then compare against the available shop stock. Out-of-stock and
@@ -336,7 +353,7 @@ class SalesService
                 'seller_id'    => $seller->id,
                 'seller_name'  => $seller->name,
                 'seller_email' => $seller->email,
-                'date'         => $data['date'],
+                'date'         => now()->toDateString(),
                 'price_type'   => $data['price_type'],
                 'status'       => ($violations && ! $overrideApproved) ? 'pending' : 'approved',
                 'total_amount' => $effectiveTotal,
@@ -397,6 +414,7 @@ class SalesService
                     'seller:id,name',
                     'shop:id,name',
                     'items.product:id,name,sku,scalar',
+                    'items.parentProduct:id,name',
                     'items.goods',
                     'payments.currency:id,code,symbol',
                 ]),
@@ -428,9 +446,12 @@ class SalesService
 
     private function processItem(Invoice $invoice, array $item): void
     {
-        $productId = (int) $item['product_id'];
-        $needed    = (float) $item['quantity'];
-        $price     = (float) $item['price'];
+        $productId       = (int) $item['product_id'];
+        $needed          = (float) $item['quantity'];
+        $price           = (float) $item['price'];
+        // Compose-dialog tagging only — both null for every normal/legacy line.
+        $parentProductId = isset($item['parent_product_id']) ? (int) $item['parent_product_id'] : null;
+        $role            = $item['role'] ?? null;
 
         // Fetch all batches with stock for this product in the seller's shop,
         // ordered oldest-first (FIFO) and locked for the transaction.
@@ -456,11 +477,13 @@ class SalesService
             $goods->decrement('current_quantity', $take);
 
             InvoiceItem::create([
-                'invoice_id' => $invoice->id,
-                'product_id' => $productId,
-                'goods_id'   => $goods->id,
-                'quantity'   => $take,
-                'price'      => $price,
+                'invoice_id'         => $invoice->id,
+                'product_id'         => $productId,
+                'parent_product_id'  => $parentProductId,
+                'role'               => $role,
+                'goods_id'           => $goods->id,
+                'quantity'           => $take,
+                'price'              => $price,
             ]);
 
             $remaining = round($remaining - $take, 3);
@@ -483,11 +506,13 @@ class SalesService
                 $fallback->decrement('current_quantity', $remaining);
 
                 InvoiceItem::create([
-                    'invoice_id' => $invoice->id,
-                    'product_id' => $productId,
-                    'goods_id'   => $fallback->id,
-                    'quantity'   => $remaining,
-                    'price'      => $price,
+                    'invoice_id'         => $invoice->id,
+                    'product_id'         => $productId,
+                    'parent_product_id'  => $parentProductId,
+                    'role'               => $role,
+                    'goods_id'           => $fallback->id,
+                    'quantity'           => $remaining,
+                    'price'              => $price,
                 ]);
             }
             // If no batch exists at all, the invoice item is simply skipped —
@@ -684,6 +709,7 @@ class SalesService
             'customer',
             'shop:id,name',
             'items.product:id,name,sku',
+            'items.parentProduct:id,name',
         ])->where('seller_id', $sellerId);
 
         if (! empty($filters['status'])) {
@@ -740,11 +766,161 @@ class SalesService
                 'name'                  => $comp->name,
                 'sku'                   => $comp->sku,
                 'unit'                  => $type->default_unit ?? ($comp->scalar ?? ''),
-                'quantity'              => (float) $c->quantity,   // per 1 parent
+                'quantity'              => (float) $c->quantity,   // per 1 parent (or default suggestion, when variable)
                 'configured_unit_price' => $this->resolveConfiguredUnitPrice($comp),
                 'shop_stock'            => $stock,
+                'is_variable_quantity'  => (bool) $c->is_variable_quantity,
+                'component_group'       => $c->component_group,
             ];
         })->all();
+    }
+
+    // ── Cashier: catalog products (Compound + Ready) ─────────────────────────
+    // Deliberately separate from searchGoods() so that endpoint's behavior
+    // never changes — this is purely additive. Returns both READY_PRODUCT
+    // (added to the invoice directly, unchanged behavior) and COMPOUND
+    // (opens the Product Builder — no recipe/components involved at all;
+    // the seller freely picks any oil + bottle at sale time). Raw materials
+    // and packaging never appear here regardless of stock, since they're
+    // never marked show_in_catalog.
+    public function searchCatalogProducts(int $shopId, ?string $search, int $limit = 30): array
+    {
+        $products = Product::query()
+            ->where('is_active', true)
+            ->where('show_in_catalog', true)
+            ->with(['category:id,minimum_sell_price,product_type_id', 'category.productType:id,sold_by,pricing_source,default_unit'])
+            ->search($search)
+            ->orderBy('name')
+            ->limit($limit)
+            ->get(['id', 'name', 'sku', 'barcode', 'image', 'product_type', 'selling_price', 'category_id', 'scalar']);
+
+        if ($products->isEmpty()) {
+            return [];
+        }
+
+        // READY_PRODUCT items need a price + shop stock so they can be added
+        // directly (unchanged behavior); COMPOUND items ignore these — their
+        // price/stock come from the chosen oil+bottle in the Product Builder.
+        $readyIds = $products->where('product_type', Product::TYPE_READY_PRODUCT)->pluck('id');
+        $stocks = $readyIds->isEmpty() ? collect() : Goods::query()
+            ->join('supply_items', 'goods.supply_item_id', '=', 'supply_items.id')
+            ->whereIn('supply_items.product_id', $readyIds)
+            ->where('goods.shop_id', $shopId)
+            ->groupBy('supply_items.product_id')
+            ->selectRaw('supply_items.product_id as pid, SUM(goods.current_quantity) as total')
+            ->pluck('total', 'pid');
+
+        return $products->map(fn ($p) => [
+            'id' => $p->id, 'name' => $p->name, 'sku' => $p->sku, 'barcode' => $p->barcode,
+            'image' => $p->image, 'product_type' => $p->product_type,
+            'configured_unit_price' => $p->product_type === Product::TYPE_READY_PRODUCT ? $this->resolveConfiguredUnitPrice($p) : null,
+            'shop_stock' => $p->product_type === Product::TYPE_READY_PRODUCT ? (float) ($stocks[$p->id] ?? 0) : null,
+            'unit' => $p->scalar,
+        ])->values()->all();
+    }
+
+    // ── Product Builder: raw materials priced as "oil" (per gram) ───────────
+    // Any RAW_MATERIAL whose category prices per-gram (pricing_source =
+    // 'category') — the seller is completely free to pick any of these, no
+    // predefined recipe restricts the choice.
+    public function searchOilProducts(int $shopId, ?string $search, int $limit = 30): mixed
+    {
+        $products = Product::query()
+            ->where('is_active', true)
+            ->where('product_type', Product::TYPE_RAW_MATERIAL)
+            ->whereHas('category.productType', fn ($q) => $q->where('pricing_source', 'category'))
+            ->with(['category:id,minimum_sell_price,product_type_id', 'category.productType:id,sold_by,pricing_source,default_unit'])
+            ->search($search)
+            ->orderBy('name')
+            ->limit($limit)
+            ->get(['id', 'name', 'sku', 'scalar', 'category_id', 'price_per_gram']);
+
+        return $this->decorateForBuilder($products, $shopId);
+    }
+
+    // ── Product Builder: packaging bottles (capacity_ml required) ───────────
+    public function searchBottleProducts(int $shopId, ?string $search, int $limit = 30): mixed
+    {
+        $products = Product::query()
+            ->where('is_active', true)
+            ->where('product_type', Product::TYPE_PACKAGING)
+            ->whereNotNull('capacity_ml')
+            ->with(['category:id,minimum_sell_price,product_type_id', 'category.productType:id,sold_by,pricing_source,default_unit'])
+            ->search($search)
+            ->orderBy('capacity_ml')
+            ->limit($limit)
+            ->get(['id', 'name', 'sku', 'scalar', 'category_id', 'selling_price', 'capacity_ml']);
+
+        return $this->decorateForBuilder($products, $shopId);
+    }
+
+    /** Attach configured_unit_price + shop_stock to a small product list (Builder pickers). */
+    private function decorateForBuilder(\Illuminate\Support\Collection $products, int $shopId): array
+    {
+        if ($products->isEmpty()) {
+            return [];
+        }
+
+        $stocks = Goods::query()
+            ->join('supply_items', 'goods.supply_item_id', '=', 'supply_items.id')
+            ->whereIn('supply_items.product_id', $products->pluck('id'))
+            ->where('goods.shop_id', $shopId)
+            ->groupBy('supply_items.product_id')
+            ->selectRaw('supply_items.product_id as pid, SUM(goods.current_quantity) as total')
+            ->pluck('total', 'pid');
+
+        return $products->map(fn ($p) => [
+            'id'                    => $p->id,
+            'name'                  => $p->name,
+            'sku'                   => $p->sku,
+            'unit'                  => $p->scalar,
+            'capacity_ml'           => $p->capacity_ml !== null ? (float) $p->capacity_ml : null,
+            'configured_unit_price' => $this->resolveConfiguredUnitPrice($p),
+            'shop_stock'            => (float) ($stocks[$p->id] ?? 0),
+        ])->values()->all();
+    }
+
+    // ── Product Builder: reference cost calculation + bottle-capacity
+    //    validation. No selling price is computed or suggested here — the
+    //    seller types it by hand in the Builder; oil/bottle cost + stock are
+    //    informational only.
+    public function calculateCompoundPrice(int $shopId, int $catalogProductId, int $oilProductId, float $oilQty, int $bottleProductId): array
+    {
+        $catalog = Product::findOrFail($catalogProductId);
+        $oil     = Product::with('category.productType')->findOrFail($oilProductId);
+        $bottle  = Product::with('category.productType')->findOrFail($bottleProductId);
+
+        if ($bottle->capacity_ml !== null && $oilQty > (float) $bottle->capacity_ml) {
+            abort(422, 'الكمية المطلوبة من الزيت أكبر من سعة الزجاجة المختارة.');
+        }
+
+        $oilUnitPrice    = $this->resolveConfiguredUnitPrice($oil) ?? 0.0;
+        $bottleUnitPrice = $this->resolveConfiguredUnitPrice($bottle) ?? 0.0;
+
+        $oilCost    = round($oilQty * $oilUnitPrice, 2);
+        $bottleCost = round($bottleUnitPrice, 2);
+        $totalCost  = round($oilCost + $bottleCost, 2);
+
+        $oilStock = (float) Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $oil->id))
+            ->where('shop_id', $shopId)->sum('current_quantity');
+        $bottleStock = (float) Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $bottle->id))
+            ->where('shop_id', $shopId)->sum('current_quantity');
+
+        return [
+            'oil_unit_price'    => $oilUnitPrice,
+            'oil_cost'          => $oilCost,
+            'oil_stock'         => $oilStock,
+            'bottle_unit_price' => $bottleUnitPrice,
+            'bottle_cost'       => $bottleCost,
+            'bottle_stock'      => $bottleStock,
+            'bottle_capacity_ml' => $bottle->capacity_ml !== null ? (float) $bottle->capacity_ml : null,
+            'total_cost'        => $totalCost,
+            'stock_ok'          => $oilStock >= $oilQty && $bottleStock >= 1,
+            // Pricing Management's stored default — pre-fills the Builder's
+            // Selling Price field. Never written back here; only Pricing
+            // Management can change it (see PricingService::updateSellingPrice).
+            'default_selling_price' => $catalog->default_selling_price !== null ? (float) $catalog->default_selling_price : null,
+        ];
     }
 
     // ── Admin: cross-shop invoice review (pending queue, etc.) ────────────────
@@ -757,6 +933,7 @@ class SalesService
             'shop:id,name',
             'items.product:id,name,sku,scalar,category_id',
             'items.product.category:id,name,minimum_sell_price',
+            'items.parentProduct:id,name',
             'payments.currency:id,code,symbol',
         ]);
 
@@ -790,6 +967,6 @@ class SalesService
 
         $invoice->update(['status' => $status]);
 
-        return $invoice->fresh(['customer', 'items.product:id,name,sku']);
+        return $invoice->fresh(['customer', 'items.product:id,name,sku', 'items.parentProduct:id,name']);
     }
 }

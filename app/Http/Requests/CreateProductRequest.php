@@ -2,7 +2,9 @@
 
 namespace App\Http\Requests;
 
+use App\Models\Product;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class CreateProductRequest extends FormRequest
 {
@@ -27,6 +29,7 @@ class CreateProductRequest extends FormRequest
             'sku' => 'nullable|string|max:100|unique:products,sku',
             'barcode' => 'nullable|string|max:100',
             'description' => 'nullable|string',
+            'notes'       => 'nullable|string',
             'is_active' => 'required|in:true,false,1,0',
             'scalar' => 'required|in:kg,g,l,ml,pcs',
             'category_id' => 'required|exists:categories,id',
@@ -36,6 +39,11 @@ class CreateProductRequest extends FormRequest
             'purchase_cost'     => 'nullable|numeric|min:0',
             'warning_quantity'  => 'nullable|numeric|min:0',
             'critical_quantity' => 'nullable|numeric|min:0|lte:warning_quantity',
+            // Catalog/BOM tagging — both optional, fully backward compatible.
+            'product_type'      => ['nullable', Rule::in(Product::PRODUCT_TYPES)],
+            'show_in_catalog'   => 'nullable|in:true,false,1,0',
+            // Bottle capacity in ml — only meaningful for PACKAGING products.
+            'capacity_ml'       => 'nullable|numeric|min:0',
         ];
     }
 
