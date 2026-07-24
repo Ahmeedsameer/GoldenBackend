@@ -34,6 +34,7 @@ class SalaryAdvance extends Model
         'reviewed_at',
         'rejection_reason',
         'completed_at',
+        'paying_safe_id',
     ];
 
     protected $casts = [
@@ -63,6 +64,12 @@ class SalaryAdvance extends Model
     public function reviewer(): BelongsTo
     {
         return $this->belongsTo(User::class, 'reviewed_by');
+    }
+
+    /** Which Safe/Custody actually paid this advance out — chosen by the admin at approval time. */
+    public function payingSafe(): BelongsTo
+    {
+        return $this->belongsTo(Safe::class, 'paying_safe_id');
     }
 
     public function installments(): HasMany

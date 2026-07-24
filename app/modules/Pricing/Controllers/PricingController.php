@@ -29,7 +29,12 @@ class PricingController extends Controller
     {
         $rows = $this->pricingService->listPricing($request->input('search'));
         $statusLabel = fn (string $s) => ['needs_review' => 'يحتاج مراجعة', 'no_price' => 'بلا سعر', 'ok' => 'محدَّث'][$s] ?? $s;
-        $typeLabel = fn (string $t) => $t === 'COMPOUND' ? 'عطر مركّب' : 'منتج جاهز';
+        $typeLabel = fn (string $t) => match ($t) {
+            'COMPOUND' => 'عطر مركّب',
+            'RAW_MATERIAL' => 'مادة خام',
+            'PACKAGING' => 'عبوة / تغليف',
+            default => 'منتج جاهز',
+        };
 
         $columns = ['المنتج', 'النوع', 'التكلفة الحالية', 'سعر البيع', 'الربح المتوقع', 'نسبة الربح %', 'آخر تحديث', 'الحالة'];
         $tableRows = array_map(fn ($r) => [

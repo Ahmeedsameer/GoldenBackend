@@ -49,7 +49,7 @@ class SalaryAdvanceController extends Controller
      */
     public function index(Request $request)
     {
-        $query = SalaryAdvance::with(['user:id,name,email,shop_id', 'user.primaryBranch:id,name', 'installments']);
+        $query = SalaryAdvance::with(['user:id,name,email,shop_id', 'user.primaryBranch:id,name', 'installments', 'payingSafe:id,shop_id', 'payingSafe.shop:id,name']);
 
         if ($request->user()->role === 'manager') {
             $branchId = Shop::where('manager_id', $request->user()->id)->value('id') ?? $request->user()->shop_id;
@@ -82,7 +82,11 @@ class SalaryAdvanceController extends Controller
     /** GET /api/hr/advances/{id} — full detail incl. installments + repayments. */
     public function show(Request $request, string $id)
     {
-        $query = SalaryAdvance::with(['user:id,name,email,shop_id', 'user.primaryBranch:id,name', 'reviewer:id,name', 'installments', 'repayments.recordedBy:id,name']);
+        $query = SalaryAdvance::with([
+            'user:id,name,email,shop_id', 'user.primaryBranch:id,name', 'reviewer:id,name', 'installments',
+            'payingSafe:id,shop_id', 'payingSafe.shop:id,name',
+            'repayments.recordedBy:id,name', 'repayments.safe:id,shop_id', 'repayments.safe.shop:id,name',
+        ]);
 
         if ($request->user()->role === 'manager') {
             $branchId = Shop::where('manager_id', $request->user()->id)->value('id') ?? $request->user()->shop_id;
@@ -137,12 +141,13 @@ class SalaryAdvanceController extends Controller
     {
         $advance = SalaryAdvance::where('status', SalaryAdvance::ACTIVE)->findOrFail($id);
         $data = $request->validate([
-            'amount' => ['required', 'numeric', 'min:0.01'],
-            'date'   => ['required', 'date'],
-            'notes'  => ['nullable', 'string'],
+            'amount'  => ['required', 'numeric', 'min:0.01'],
+            'date'    => ['required', 'date'],
+            'safe_id' => ['required', 'integer', 'exists:safes,id'],
+            'notes'   => ['nullable', 'string'],
         ]);
 
-        $advance = $this->advances->recordEarlyRepayment($advance, (float) $data['amount'], $data['date'], $request->user(), $data['notes'] ?? null);
+        $advance = $this->advances->recordEarlyRepayment($advance, (float) $data['amount'], $data['date'], (int) $data['safe_id'], $request->user(), $data['notes'] ?? null);
 
         return response()->json(['message' => 'تم تسجيل السداد المبكر', 'data' => $advance]);
     }
@@ -151,6 +156,8 @@ class SalaryAdvanceController extends Controller
     {
         return $request->validate([
             'approved_amount' => [$requireApprovedAmount ? 'required' : 'sometimes', 'numeric', 'min:0.01'],
+            // Part 6.1 — required only at approval time (updatePlan never touches the Safe).
+            'safe_id'         => [$requireApprovedAmount ? 'required' : 'sometimes', 'integer', 'exists:safes,id'],
             'mode'            => ['required', Rule::in(['date_range', 'fixed_amount', 'fixed_months', 'custom'])],
             'monthly_amount'  => ['required_if:mode,fixed_amount', 'numeric', 'min:0.01'],
             'months'          => ['required_if:mode,fixed_months', 'integer', 'min:1', 'max:60'],

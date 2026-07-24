@@ -15,7 +15,7 @@ class ShopController extends Controller
 
     public function index()
     {
-        $filters = request()->only(['search', 'status']);
+        $filters = request()->only(['search', 'status', 'exclude_warehouse']);
         $perPage = request()->integer('per_page', 15);
 
         $shops = $this->shopService->getAll($filters, $perPage);

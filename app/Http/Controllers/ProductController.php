@@ -2,7 +2,10 @@
 
 namespace App\Http\Controllers;
 
-use App\Http\Requests\CreateProductRequest;
+use App\Http\Requests\StoreCompoundRequest;
+use App\Http\Requests\StorePackagingRequest;
+use App\Http\Requests\StoreRawMaterialRequest;
+use App\Http\Requests\StoreReadyProductRequest;
 use App\Http\Requests\UpdateProductRequest;
 use App\Http\Resources\ProductResource;
 use App\Http\Services\ProductDetailService;
@@ -125,7 +128,7 @@ class ProductController extends Controller
         $perPage = max(1, min((int) request('per_page', request('limit', 30)), 100));
 
         // Newest first so a just-created product is immediately at the top.
-        $products = $query->with('category.productType')
+        $products = $query->with('category.productType', 'defaultOil:id,name')
             ->orderByDesc('id')
             ->paginate($perPage);
 
@@ -141,13 +144,58 @@ class ProductController extends Controller
     }
 
     /**
-     * Store a newly created resource in storage.
+     * GET /api/products/oil-options — admin Product Management screen's
+     * "Default Oil" picker for Composite Products. Same "what counts as an
+     * oil" definition as SalesService::searchOilProducts() (Raw Material +
+     * category priced per-gram), but not shop-scoped/stock-decorated since
+     * this is a catalog reference picker, not a point-of-sale stock lookup.
      */
-    public function store(CreateProductRequest $request)
+    public function oilOptions()
+    {
+        $products = Product::query()
+            ->where('is_active', true)
+            ->where('product_type', Product::TYPE_RAW_MATERIAL)
+            ->whereHas('category.productType', fn ($q) => $q->where('pricing_source', 'category'))
+            ->search(request('search'))
+            ->orderBy('name')
+            ->limit(200)
+            ->get(['id', 'name', 'sku']);
+
+        return response()->json(['message' => 'ok', 'data' => $products]);
+    }
+
+    // ── Four independent Product Creation Forms ────────────────────────────
+    // Each has its own request class (own fields, own validation) and its own
+    // frontend page/component — never the shared generic form. All four still
+    // reuse ProductService::create() (same category-threshold defaults, SKU
+    // auto-generation, and Product-Type-driven scalar/pricing rules).
+
+    public function storeRawMaterial(StoreRawMaterialRequest $request)
     {
         $this->productService->create($request);
 
-        return response()->json(['message'=> 'تم انشاء المنتج بنجاح'], 201);
+        return response()->json(['message' => 'تم إنشاء المادة الخام بنجاح'], 201);
+    }
+
+    public function storePackaging(StorePackagingRequest $request)
+    {
+        $this->productService->create($request);
+
+        return response()->json(['message' => 'تم إنشاء منتج التغليف بنجاح'], 201);
+    }
+
+    public function storeReadyProduct(StoreReadyProductRequest $request)
+    {
+        $this->productService->create($request);
+
+        return response()->json(['message' => 'تم إنشاء المنتج الجاهز بنجاح'], 201);
+    }
+
+    public function storeCompound(StoreCompoundRequest $request)
+    {
+        $this->productService->create($request);
+
+        return response()->json(['message' => 'تم إنشاء العطر المركّب بنجاح'], 201);
     }
 
     /**
@@ -155,7 +203,7 @@ class ProductController extends Controller
      */
     public function show(string $id)
     {
-        $product = Product::with('category.productType')->findOrFail($id);
+        $product = Product::with('category.productType', 'defaultOil:id,name')->findOrFail($id);
 
         return new ProductResource($product);
     }

@@ -45,7 +45,14 @@ class ProductService{
     /**
      * Behavior is driven by the Product Type (never by category name):
      *  - the inventory unit is taken from the type's default_unit
-     *    (oil → g, bottle/accessory/packaging → pcs);
+     *    (oil → g, bottle/accessory/packaging → pcs) for Ready Products,
+     *    Packaging and Compound, none of which offer their own unit choice;
+     *  - Raw Materials are the one exception — their dedicated creation form
+     *    (StoreRawMaterialRequest) lets the admin deliberately choose g/ml
+     *    per the ERP spec (Alcohol=ml, everything else=g), so that choice
+     *    must never be silently overridden by the category's default_unit
+     *    here (categories like "كحول" share the same ProductType as
+     *    piece-counted ready products, whose default_unit is 'pcs');
      *  - for oil (pricing_source = category) the selling price lives on the
      *    category, so any per-product selling_price is cleared.
      */
@@ -60,7 +67,7 @@ class ProductService{
             return;
         }
 
-        if ($type->default_unit) {
+        if ($type->default_unit && ($data['product_type'] ?? null) !== Product::TYPE_RAW_MATERIAL) {
             $data['scalar'] = $type->default_unit;
         }
 

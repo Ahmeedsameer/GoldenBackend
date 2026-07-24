@@ -65,11 +65,29 @@ class StoreInvoiceRequest extends FormRequest
             // Compose-dialog tagging only (display grouping) — never affects
             // pricing/FIFO. Both null for every normal/legacy line.
             'items.*.parent_product_id' => ['nullable', 'integer', 'exists:products,id'],
-            'items.*.role'              => ['nullable', 'in:oil,bottle'],
+            'items.*.role'              => ['nullable', 'in:oil,bottle,alcohol'],
 
             // Cache-based override token — set when manager has approved the request
             'override_token'     => ['nullable', 'string', 'uuid'],
         ];
+    }
+
+    /** A zero-priced line is only ever legitimate for the Alcohol role (an
+     *  operational material, never charged to the customer — see
+     *  catalog-sell-dialog's addToInvoice). Any other product sent with an
+     *  explicit price of 0 is rejected here, server-side, regardless of what
+     *  the client sent. */
+    public function withValidator(\Illuminate\Validation\Validator $validator): void
+    {
+        $validator->after(function (\Illuminate\Validation\Validator $validator) {
+            foreach ((array) $this->input('items', []) as $index => $item) {
+                $price = $item['price'] ?? null;
+                $role  = $item['role'] ?? null;
+                if ($price !== null && (float) $price === 0.0 && $role !== 'alcohol') {
+                    $validator->errors()->add("items.$index.price", 'سعر الوحدة يجب أن يكون أكبر من صفر لهذا الصنف.');
+                }
+            }
+        });
     }
 
     public function messages(): array

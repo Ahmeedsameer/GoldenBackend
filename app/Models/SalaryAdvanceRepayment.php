@@ -9,6 +9,7 @@ class SalaryAdvanceRepayment extends Model
 {
     protected $fillable = [
         'salary_advance_id',
+        'safe_id',
         'amount',
         'date',
         'recorded_by',
@@ -28,5 +29,11 @@ class SalaryAdvanceRepayment extends Model
     public function recordedBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'recorded_by');
+    }
+
+    /** Which Safe/Custody received this specific repayment — chosen by the admin at recording time. */
+    public function safe(): BelongsTo
+    {
+        return $this->belongsTo(Safe::class);
     }
 }

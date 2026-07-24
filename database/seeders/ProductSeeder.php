@@ -8,6 +8,20 @@ use Illuminate\Database\Seeder;
 
 class ProductSeeder extends Seeder
 {
+    /** Category name → creation type (RAW_MATERIAL/PACKAGING/READY_PRODUCT) — this
+     *  drives Supply/Transfer/FIFO eligibility and the Assemble-on-Sale pickers, so
+     *  every seeded product must carry it (never left null). No COMPOUND products
+     *  are seeded here — those are created via the admin UI, each with its own
+     *  optional Default Oil. */
+    private const CATEGORY_TYPE_MAP = [
+        'عطور جاهزة'        => Product::TYPE_READY_PRODUCT,
+        'زيوت عطرية'        => Product::TYPE_RAW_MATERIAL,
+        'بخور وعود'         => Product::TYPE_RAW_MATERIAL,
+        'قواعد وحوامل'      => Product::TYPE_RAW_MATERIAL,
+        'كحول'              => Product::TYPE_RAW_MATERIAL,
+        'عبوات وأدوات'      => Product::TYPE_PACKAGING,
+        'مستلزمات التغليف'  => Product::TYPE_PACKAGING,
+    ];
     /**
      * Products for a perfume company.
      *
@@ -61,7 +75,7 @@ class ProductSeeder extends Seeder
 
             // ── قواعد وحوامل — Carrier bases (ml) ───────────────────────────
             // Diluents and carriers for custom blending; large volumes, low cost per ml
-            ['name' => 'كحول عطري 96%',              'sku' => 'BAS-001', 'scalar' => 'ml',  'category' => 'قواعد وحوامل'],
+            ['name' => 'كحول عطري 96%',              'sku' => 'BAS-001', 'scalar' => 'ml',  'category' => 'كحول'],
             ['name' => 'DPG ثنائي بروبيلين جليكول',   'sku' => 'BAS-002', 'scalar' => 'ml',  'category' => 'قواعد وحوامل'],
             ['name' => 'زيت الجوجوبا',                'sku' => 'BAS-003', 'scalar' => 'ml',  'category' => 'قواعد وحوامل'],
             ['name' => 'IPM (إيزوبروبيل ميريستيت)',   'sku' => 'BAS-004', 'scalar' => 'ml',  'category' => 'قواعد وحوامل'],
@@ -87,11 +101,15 @@ class ProductSeeder extends Seeder
 
         foreach ($products as $p) {
             Product::create([
-                'name'        => $p['name'],
-                'sku'         => $p['sku'],
-                'scalar'      => $p['scalar'],
-                'is_active'   => true,
-                'category_id' => $cat[$p['category']] ?? null,
+                'name'          => $p['name'],
+                'sku'           => $p['sku'],
+                'scalar'        => $p['scalar'],
+                'is_active'     => true,
+                'category_id'   => $cat[$p['category']] ?? null,
+                'product_type'  => self::CATEGORY_TYPE_MAP[$p['category']] ?? null,
+                // Only Finished Products (ready-made perfumes) are sold directly from
+                // the catalog on their own — raw materials/packaging never appear there.
+                'show_in_catalog' => (self::CATEGORY_TYPE_MAP[$p['category']] ?? null) === Product::TYPE_READY_PRODUCT,
             ]);
         }
     }

@@ -28,6 +28,15 @@ class ShopService
             $query->where('status', $filters['status']);
         }
 
+        // Opt-in only — the Main Warehouse (is_warehouse=true) is a real Shop
+        // row so Transfer Requests/dashboards/reports can treat it as a
+        // location, but it isn't a retail branch: callers that build a
+        // "pick a branch" list unrelated to stock transfers (employee
+        // assignment, schedules, safes, etc.) pass this to keep it out.
+        if (!empty($filters['exclude_warehouse'])) {
+            $query->where('is_warehouse', false);
+        }
+
         return $query->withCount('employees')->paginate($perPage);
     }
 

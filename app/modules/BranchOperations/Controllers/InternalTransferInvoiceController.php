@@ -56,6 +56,33 @@ class InternalTransferInvoiceController extends Controller
             'received' => 'تم الاستلام', 'closed' => 'مغلق',
         ];
 
+        // Same labels used everywhere else priority is shown (transfer-create form, dashboards) —
+        // the raw enum value ('normal', 'urgent', …) must never leak into a printed document.
+        $priorityLabels = [
+            'low' => 'منخفضة', 'normal' => 'عادية', 'high' => 'مرتفعة', 'urgent' => 'عاجلة',
+        ];
+
+        // dompdf has no Arabic shaping/bidi engine (see ArabicShaper's own docblock) — EVERY
+        // Arabic string must be pre-shaped before reaching the view, including static UI
+        // labels. These used to be hardcoded directly in the blade file and rendered as
+        // disconnected, wrong-order letterforms because they never went through
+        // ArabicShaper::shape(); now every label is shaped here, exactly like the dynamic
+        // values already were.
+        $labels = ArabicShaper::shapeDeep([
+            'request_number' => 'رقم طلب النقل', 'status' => 'الحالة',
+            'transfer_type' => 'نوع النقل', 'priority' => 'الأولوية',
+            'from_branch' => 'من فرع', 'to_branch' => 'إلى فرع',
+            'requested_by' => 'طلب بواسطة', 'approved_by' => 'اعتمد بواسطة',
+            'shipped_by' => 'شحن بواسطة', 'received_by' => 'استلم بواسطة',
+            'th_missing' => 'مفقود', 'th_damaged' => 'تالف',
+            'th_received_qty' => 'الكمية المستلمة', 'th_shipped_qty' => 'الكمية المشحونة',
+            'th_approved_qty' => 'الكمية المعتمدة', 'th_requested_qty' => 'الكمية المطلوبة',
+            'th_unit_cost' => 'تكلفة الوحدة', 'th_unit' => 'الوحدة', 'th_product' => 'المنتج',
+            'no_items' => 'لا توجد أصناف',
+            'reference_value' => 'القيمة المرجعية', 'notes' => 'ملاحظات', 'currency' => 'ج.م',
+            'sig_shipper' => 'توقيع الشاحن', 'sig_receiver' => 'توقيع المستلم',
+        ]);
+
         $items = $transfer->items->map(fn ($item) => [
             'product_name' => $item->product->name ?? '',
             'sku' => $item->product->sku ?? '',
@@ -76,11 +103,13 @@ class InternalTransferInvoiceController extends Controller
         $qrDataUri = 'data:image/svg+xml;base64,' . base64_encode($qrSvg);
 
         // Phase 5.3 — Transfer Type derived from is_emergency + WarehouseResolver, never a stored/duplicated field.
+        // Wording matches exactly what every transfer report screen uses (TransferReportController)
+        // so the same transfer never reads differently on the PDF vs. in a report/table.
         $transferType = $transfer->is_emergency
             ? 'نقل طارئ'
             : (($this->warehouse->isWarehouse($transfer->source_shop_id) || $this->warehouse->isWarehouse($transfer->destination_shop_id))
-                ? 'نقل من/إلى المستودع الرئيسي'
-                : 'نقل بين الفروع');
+                ? 'المستودع إلى فرع'
+                : 'فرع إلى فرع');
 
         $data = [
             'company' => $company,
@@ -94,6 +123,7 @@ class InternalTransferInvoiceController extends Controller
             'generatedAt' => $transfer->internalInvoice->created_at->format('Y-m-d H:i'),
             'transfer' => $transfer,
             'statusLabel' => ArabicShaper::shape($statusLabels[$transfer->status] ?? $transfer->status),
+            'priorityLabel' => ArabicShaper::shape($priorityLabels[$transfer->priority] ?? $transfer->priority),
             'transferType' => ArabicShaper::shape($transferType),
             'sourceShopName' => ArabicShaper::shape($transfer->sourceShop->name ?? ''),
             'destinationShopName' => ArabicShaper::shape($transfer->destinationShop->name ?? ''),
@@ -105,6 +135,7 @@ class InternalTransferInvoiceController extends Controller
             'items' => ArabicShaper::shapeDeep($items->toArray()),
             'title' => ArabicShaper::shape('فاتورة نقل داخلية'),
             'internalOnlyNote' => ArabicShaper::shape('مستند داخلي فقط — لا يُستخدم كفاتورة بيع ولا يظهر في تقارير المبيعات أو الإيرادات'),
+            'labels' => $labels,
         ];
 
         $pdf = Pdf::loadView('branch-operations.internal-transfer-invoice', $data)->setPaper('a4', 'portrait');

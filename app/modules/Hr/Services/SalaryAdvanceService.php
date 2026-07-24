@@ -2,13 +2,16 @@
 
 namespace App\Modules\Hr\Services;
 
+use App\Models\Currency;
 use App\Models\Payroll;
+use App\Models\Safe;
 use App\Models\SalaryAdvance;
 use App\Models\SalaryAdvanceInstallment;
 use App\Models\SalaryAdvanceRepayment;
 use App\Models\Shop;
 use App\Models\User;
 use App\Modules\Convention\Services\NotificationService;
+use App\Modules\Safe\Services\SafeService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -31,7 +34,14 @@ class SalaryAdvanceService
     public function __construct(
         private HrAuditLogger $audit,
         private NotificationService $notifications,
+        private SafeService $safes,
     ) {}
+
+    /** Company-wide default currency for advance disbursements/repayments — same fallback SalesService already uses. */
+    private function defaultCurrencyId(): int
+    {
+        return Currency::where('code', 'EGP')->value('id');
+    }
 
     public function create(User $employee, array $data): SalaryAdvance
     {
@@ -78,7 +88,7 @@ class SalaryAdvanceService
      *   fixed_months — a fixed number of months; the monthly amount is computed.
      *   custom       — the admin enters every month's amount explicitly.
      *
-     * @param  array{approved_amount:float, mode:string, monthly_amount?:float, months?:int, schedule?:array, start_year?:int, start_month?:int, end_year?:int, end_month?:int}  $plan
+     * @param  array{approved_amount:float, mode:string, safe_id:int, monthly_amount?:float, months?:int, schedule?:array, start_year?:int, start_month?:int, end_year?:int, end_month?:int}  $plan
      */
     public function approve(SalaryAdvance $advance, array $plan, User $actor): SalaryAdvance
     {
@@ -91,26 +101,36 @@ class SalaryAdvanceService
             throw ValidationException::withMessages(['approved_amount' => 'المبلغ المعتمد يجب أن يكون أكبر من صفر ولا يتجاوز المبلغ المطلوب.']);
         }
 
+        // Part 6.1 — the admin picks WHICH Safe/Custody pays this advance out (Main
+        // Safe or any branch's) — never an implicit "employee's branch custody".
+        $safe = Safe::where('is_active', true)->findOrFail((int) $plan['safe_id']);
+
         $start = (! empty($plan['start_year']) && ! empty($plan['start_month']))
             ? Carbon::create((int) $plan['start_year'], (int) $plan['start_month'], 1)
             : Carbon::now()->addMonthNoOverflow()->startOfMonth();
 
         $rows = $this->buildInstallmentRows($approvedAmount, $plan['mode'], $plan, $start, 1);
 
-        return DB::transaction(function () use ($advance, $approvedAmount, $plan, $rows, $actor) {
+        return DB::transaction(function () use ($advance, $approvedAmount, $plan, $rows, $actor, $safe) {
             $advance->update([
                 'status' => SalaryAdvance::ACTIVE,
                 'approved_amount' => $approvedAmount,
                 'installment_mode' => $plan['mode'],
                 'reviewed_by' => $actor->id,
                 'reviewed_at' => now(),
+                'paying_safe_id' => $safe->id,
             ]);
 
             foreach ($rows as $row) {
                 $advance->installments()->create($row);
             }
 
-            $this->audit->log('advance.approved', $advance, ['status' => SalaryAdvance::PENDING], ['status' => SalaryAdvance::ACTIVE, 'approved_amount' => $approvedAmount]);
+            $this->safes->recordAdvanceDisbursement(
+                $safe, $advance, $this->defaultCurrencyId(), $approvedAmount, $actor->id,
+                "صرف سلفة للموظف {$advance->user->name}",
+            );
+
+            $this->audit->log('advance.approved', $advance, ['status' => SalaryAdvance::PENDING], ['status' => SalaryAdvance::ACTIVE, 'approved_amount' => $approvedAmount, 'paying_safe_id' => $safe->id]);
             $this->audit->log('advance.plan_created', $advance, null, ['mode' => $plan['mode'], 'installments' => count($rows)]);
 
             $this->notifications->notify([$advance->user_id], 'advance', 'تمت الموافقة على طلب السلفة',
@@ -139,6 +159,17 @@ class SalaryAdvanceService
         return DB::transaction(function () use ($advance, $actor) {
             $advance->installments()->where('status', SalaryAdvanceInstallment::PENDING)->update(['status' => SalaryAdvanceInstallment::CANCELLED]);
             $advance->update(['status' => SalaryAdvance::CANCELLED]);
+
+            // The disbursement already left the paying Safe at approval time — cancelling
+            // before any deduction/repayment means it was never actually handed to the
+            // employee, so credit it straight back to the same Safe it came from.
+            if ($advance->paying_safe_id) {
+                $this->safes->recordAdvanceRepayment(
+                    Safe::findOrFail($advance->paying_safe_id), $advance, $this->defaultCurrencyId(),
+                    (float) $advance->approved_amount, $actor->id,
+                    "إلغاء سلفة الموظف {$advance->user->name} — إعادة المبلغ للخزنة",
+                );
+            }
 
             $this->audit->log('advance.cancelled', $advance, ['status' => SalaryAdvance::ACTIVE], ['status' => SalaryAdvance::CANCELLED, 'cancelled_by' => $actor->id]);
 
@@ -191,7 +222,7 @@ class SalaryAdvanceService
     }
 
     /** Admin records a manual/early payment outside the normal payroll cycle. */
-    public function recordEarlyRepayment(SalaryAdvance $advance, float $amount, string $date, User $actor, ?string $notes = null): SalaryAdvance
+    public function recordEarlyRepayment(SalaryAdvance $advance, float $amount, string $date, int $safeId, User $actor, ?string $notes = null): SalaryAdvance
     {
         if ($advance->status !== SalaryAdvance::ACTIVE) {
             throw ValidationException::withMessages(['advance' => 'يمكن تسجيل سداد مبكر للسلف النشطة فقط.']);
@@ -201,11 +232,19 @@ class SalaryAdvanceService
             throw ValidationException::withMessages(['amount' => 'المبلغ غير صالح أو يتجاوز الرصيد المتبقي.']);
         }
 
-        return DB::transaction(function () use ($advance, $amount, $date, $actor, $notes) {
+        // Part 6.2 — the admin picks WHICH Safe/Custody actually received this repayment.
+        $safe = Safe::where('is_active', true)->findOrFail($safeId);
+
+        return DB::transaction(function () use ($advance, $amount, $date, $actor, $notes, $safe) {
             SalaryAdvanceRepayment::create([
-                'salary_advance_id' => $advance->id, 'amount' => $amount, 'date' => $date,
+                'salary_advance_id' => $advance->id, 'safe_id' => $safe->id, 'amount' => $amount, 'date' => $date,
                 'recorded_by' => $actor->id, 'notes' => $notes,
             ]);
+
+            $this->safes->recordAdvanceRepayment(
+                $safe, $advance, $this->defaultCurrencyId(), $amount, $actor->id,
+                "سداد مبكر لسلفة الموظف {$advance->user->name}",
+            );
 
             $before = ['paid_amount' => (float) $advance->paid_amount];
             $advance->paid_amount = round((float) $advance->paid_amount + $amount, 2);

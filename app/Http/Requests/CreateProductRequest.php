@@ -44,6 +44,20 @@ class CreateProductRequest extends FormRequest
             'show_in_catalog'   => 'nullable|in:true,false,1,0',
             // Bottle capacity in ml — only meaningful for PACKAGING products.
             'capacity_ml'       => 'nullable|numeric|min:0',
+            // Composite Products only — a preferred oil, pre-selected (never locked)
+            // in the cashier's Assemble-on-Sale dialog. NOT a recipe/BOM. Must be an
+            // actual oil (same definition SalesService::searchOilProducts() uses).
+            'default_oil_id'    => [
+                'nullable', 'integer', 'exists:products,id',
+                function ($attribute, $value, $fail) {
+                    if ($value && ! Product::where('id', $value)
+                        ->where('product_type', Product::TYPE_RAW_MATERIAL)
+                        ->whereHas('category.productType', fn ($q) => $q->where('pricing_source', 'category'))
+                        ->exists()) {
+                        $fail('الزيت الافتراضي يجب أن يكون مادة خام من فئة زيوت.');
+                    }
+                },
+            ],
         ];
     }
 

@@ -11,14 +11,16 @@ class SafeTransaction extends Model
      * Direction is always derived from type — never set freely by caller.
      */
     public const DIRECTION_MAP = [
-        'sale'              => 'in',
-        'refund'            => 'out',
-        'admin_deposit'     => 'in',
-        'admin_withdrawal'  => 'out',
-        'manager_deposit'   => 'in',
-        'manager_expense'   => 'out',
-        'transfer_in'       => 'in',
-        'transfer_out'      => 'out',
+        'sale'                 => 'in',
+        'refund'               => 'out',
+        'admin_deposit'        => 'in',
+        'admin_withdrawal'     => 'out',
+        'manager_deposit'      => 'in',
+        'manager_expense'      => 'out',
+        'transfer_in'          => 'in',
+        'transfer_out'         => 'out',
+        'advance_disbursement' => 'out',
+        'advance_repayment'    => 'in',
     ];
 
     protected $fillable = [
@@ -31,6 +33,7 @@ class SafeTransaction extends Model
         'note',
         'invoice_id',
         'transfer_id',
+        'salary_advance_id',
         'user_id',
     ];
 
@@ -59,6 +62,11 @@ class SafeTransaction extends Model
     public function transfer(): BelongsTo
     {
         return $this->belongsTo(SafeTransfer::class, 'transfer_id');
+    }
+
+    public function salaryAdvance(): BelongsTo
+    {
+        return $this->belongsTo(SalaryAdvance::class);
     }
 
     public function user(): BelongsTo

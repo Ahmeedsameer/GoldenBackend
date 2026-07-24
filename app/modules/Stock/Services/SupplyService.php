@@ -3,6 +3,7 @@
 namespace App\Modules\Stock\Services;
 
 use App\Models\Goods;
+use App\Models\Product;
 use App\Models\Supply;
 use App\Models\SupplyItem;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
@@ -103,6 +104,13 @@ class SupplyService
         ])->findOrFail($id);
     }
 
+    /** Purchase-unit → inventory-unit (Product.scalar) conversion factors.
+     *  The supplier's invoice can be denominated in a larger unit than what
+     *  stock is tracked in (oil bought by the kilogram, stock tracked in
+     *  grams) — quantity is multiplied and unit_price divided by this factor
+     *  so total cost (quantity × unit_price) is always preserved exactly. */
+    private const UNIT_FACTOR = ['g' => 1, 'kg' => 1000, 'ml' => 1, 'l' => 1000, 'pcs' => 1];
+
     /**
      * إنشاء توريد مع أصنافه وإضافتها تلقائياً إلى المستودع الرئيسي.
      */
@@ -119,20 +127,37 @@ class SupplyService
 
             // 2. إنشاء كل صنف وإضافة كميته إلى المستودع الرئيسي تلقائياً
             foreach ($data['items'] as $item) {
+                // Convert whatever unit the supplier's invoice used (e.g. kg,
+                // litre) into the product's real inventory unit — Goods and
+                // SupplyItem always store quantity/cost in that base unit,
+                // regardless of what the admin picked when receiving stock.
+                $factor = self::UNIT_FACTOR[$item['unit'] ?? null] ?? 1;
+                $baseQuantity = round($item['quantity'] * $factor, 3);
+                $baseUnitPrice = round($item['unit_price'] / $factor, 2);
+
                 $supplyItem = SupplyItem::create([
                     'supply_id'  => $supply->id,
                     'product_id' => $item['product_id'],
-                    'quantity'   => $item['quantity'],
-                    'unit_price' => $item['unit_price'],
+                    'quantity'   => $baseQuantity,
+                    'unit_price' => $baseUnitPrice,
                 ]);
 
                 // التخزين التلقائي في المستودع الرئيسي (shop_id = null)
                 Goods::create([
                     'supply_item_id'   => $supplyItem->id,
                     'shop_id'          => null,
-                    'current_quantity' => $item['quantity'],
+                    'current_quantity' => $baseQuantity,
                     'date'             => $today,
                 ]);
+
+                // First-ever supply of a bottle can record its capacity right
+                // here — never overwrites a value Product Management already
+                // set (same "first-fill, never lock" pattern as Default Oil).
+                if (! empty($item['capacity_ml'])) {
+                    Product::where('id', $item['product_id'])
+                        ->whereNull('capacity_ml')
+                        ->update(['capacity_ml' => $item['capacity_ml']]);
+                }
             }
 
             return $supply->load(['supplier:id,name,phone', 'items.product:id,name,scalar']);

@@ -57,17 +57,31 @@ class PricingService
         return round((float) $row->total_cost / (float) $row->total_qty, 2);
     }
 
-    // ── Pricing table (Compound + Ready Products only) ───────────────────────
+    // ── Pricing table (Compound, Ready, Raw Material, Packaging) ─────────────
 
     public function listPricing(?string $search = null): array
     {
         $products = Product::query()
-            ->whereIn('product_type', [Product::TYPE_COMPOUND, Product::TYPE_READY_PRODUCT])
+            ->whereIn('product_type', [
+                Product::TYPE_COMPOUND, Product::TYPE_READY_PRODUCT,
+                Product::TYPE_RAW_MATERIAL, Product::TYPE_PACKAGING,
+            ])
+            ->with('category.productType:id,pricing_source')
             ->search($search)
             ->orderBy('name')
-            ->get(['id', 'name', 'sku', 'product_type', 'selling_price', 'default_selling_price', 'priced_cost', 'priced_at']);
+            ->get(['id', 'name', 'sku', 'scalar', 'product_type', 'category_id', 'selling_price', 'price_per_gram', 'default_selling_price', 'priced_cost', 'priced_at']);
 
         return $products->map(fn (Product $p) => $this->rowFor($p))->values()->all();
+    }
+
+    /** Raw Materials whose category prices per-gram (oils) are edited via
+     *  `price_per_gram` — every other priceable type (Ready Products,
+     *  Packaging/bottles, and product-priced Raw Materials like Alcohol) uses
+     *  `selling_price`, exactly the field Sales reads via
+     *  SalesService::resolveConfiguredUnitPrice(). */
+    private function isPricedByGram(Product $product): bool
+    {
+        return optional($product->category?->productType)->pricing_source === 'category';
     }
 
     public function rowFor(Product $product): array
@@ -78,6 +92,8 @@ class PricingService
             return [
                 'id' => $product->id, 'name' => $product->name, 'sku' => $product->sku,
                 'product_type' => $product->product_type,
+                'pricing_field' => 'default_selling_price',
+                'unit' => $product->scalar,
                 'current_cost' => null,
                 'selling_price' => $price,
                 'estimated_profit' => null,
@@ -87,9 +103,13 @@ class PricingService
             ];
         }
 
+        $pricedByGram = $this->isPricedByGram($product);
+
         $liveCost   = $this->latestPurchaseCost($product->id);
         $pricedCost = $product->priced_cost !== null ? (float) $product->priced_cost : null;
-        $price      = $product->selling_price !== null ? (float) $product->selling_price : null;
+        $price      = $pricedByGram
+            ? ($product->price_per_gram !== null ? (float) $product->price_per_gram : null)
+            : ($product->selling_price !== null ? (float) $product->selling_price : null);
 
         // The cost shown in the table is the *snapshot* Pricing is working
         // from (pricedCost) — purchasing new stock never silently changes
@@ -105,6 +125,8 @@ class PricingService
         return [
             'id' => $product->id, 'name' => $product->name, 'sku' => $product->sku,
             'product_type' => $product->product_type,
+            'pricing_field' => $pricedByGram ? 'price_per_gram' : 'selling_price',
+            'unit' => $product->scalar,
             'current_cost' => $displayCost,
             'selling_price' => $price,
             'estimated_profit' => $profit,
@@ -187,16 +209,20 @@ class PricingService
 
     public function updateSellingPrice(Product $product, float $newPrice, ?string $reason, User $admin): void
     {
-        if (! in_array($product->product_type, [Product::TYPE_COMPOUND, Product::TYPE_READY_PRODUCT], true)) {
+        if (! in_array($product->product_type, [
+            Product::TYPE_COMPOUND, Product::TYPE_READY_PRODUCT,
+            Product::TYPE_RAW_MATERIAL, Product::TYPE_PACKAGING,
+        ], true)) {
             abort(422, 'هذا المنتج غير قابل للتسعير من هنا.');
         }
 
         $isCompound = $product->product_type === Product::TYPE_COMPOUND;
-        $oldPrice = $isCompound
-            ? ($product->default_selling_price !== null ? (float) $product->default_selling_price : null)
-            : ($product->selling_price !== null ? (float) $product->selling_price : null);
+        $pricedByGram = ! $isCompound && $this->isPricedByGram($product);
+        $field = $isCompound ? 'default_selling_price' : ($pricedByGram ? 'price_per_gram' : 'selling_price');
 
-        DB::transaction(function () use ($product, $newPrice, $reason, $admin, $isCompound, $oldPrice) {
+        $oldPrice = $product->{$field} !== null ? (float) $product->{$field} : null;
+
+        DB::transaction(function () use ($product, $newPrice, $reason, $admin, $field, $oldPrice) {
             PriceHistory::create([
                 'product_id' => $product->id,
                 'old_cost' => null, 'new_cost' => null,
@@ -206,9 +232,7 @@ class PricingService
                 'updated_by' => $admin->id,
             ]);
 
-            $product->update($isCompound
-                ? ['default_selling_price' => round($newPrice, 2), 'priced_at' => now()]
-                : ['selling_price' => round($newPrice, 2), 'priced_at' => now()]);
+            $product->update([$field => round($newPrice, 2), 'priced_at' => now()]);
         });
     }
 

@@ -5,6 +5,7 @@ namespace App\Modules\Safe\Services;
 use App\Models\Invoice;
 use App\Models\Safe;
 use App\Models\SafeBalance;
+use App\Models\SalaryAdvance;
 use App\Models\SafeTransaction;
 use App\Models\SafeTransfer;
 use App\Models\SafeType;
@@ -166,6 +167,40 @@ class SafeService
         return $this->applyTransaction($safe, 'sale', $currencyId, $amount, $userId, null, null, $invoice->id);
     }
 
+    // ── Salary Advance disbursement / repayment (Phase 6.1/6.2) ───────────────
+    // The admin picks WHICH Safe/Custody pays an advance out (any safe — Main
+    // Safe or any branch's), and WHICH Safe/Custody receives each repayment.
+    // These are ordinary outgoing/incoming SafeTransaction rows, exactly like
+    // every other manual movement — just linked back to the SalaryAdvance via
+    // its own dedicated FK instead of invoice_id/transfer_id.
+
+    public function recordAdvanceDisbursement(
+        Safe          $safe,
+        SalaryAdvance $advance,
+        int           $currencyId,
+        float         $amount,
+        int           $userId,
+        ?string       $note = null
+    ): SafeTransaction {
+        return DB::transaction(function () use ($safe, $advance, $currencyId, $amount, $userId, $note) {
+            $this->guardAgainstOverdraft($safe->id, $currencyId, $amount);
+            return $this->applyTransaction($safe, 'advance_disbursement', $currencyId, $amount, $userId, null, $note, null, null, $advance->id);
+        });
+    }
+
+    public function recordAdvanceRepayment(
+        Safe          $safe,
+        SalaryAdvance $advance,
+        int           $currencyId,
+        float         $amount,
+        int           $userId,
+        ?string       $note = null
+    ): SafeTransaction {
+        return DB::transaction(function () use ($safe, $advance, $currencyId, $amount, $userId, $note) {
+            return $this->applyTransaction($safe, 'advance_repayment', $currencyId, $amount, $userId, null, $note, null, null, $advance->id);
+        });
+    }
+
     // ── Private: core write ───────────────────────────────────────────────────
 
     private function applyTransaction(
@@ -174,26 +209,28 @@ class SafeService
         int     $currencyId,
         float   $amount,
         int     $userId,
-        ?int    $reasonId   = null,
-        ?string $note       = null,
-        ?int    $invoiceId  = null,
-        ?int    $transferId = null
+        ?int    $reasonId        = null,
+        ?string $note            = null,
+        ?int    $invoiceId       = null,
+        ?int    $transferId      = null,
+        ?int    $salaryAdvanceId = null
     ): SafeTransaction {
         $direction = SafeTransaction::DIRECTION_MAP[$type];
 
         $this->updateBalance($safe->id, $currencyId, $direction, $amount);
 
         return SafeTransaction::create([
-            'safe_id'     => $safe->id,
-            'type'        => $type,
-            'direction'   => $direction,
-            'currency_id' => $currencyId,
-            'amount'      => $amount,
-            'reason_id'   => $reasonId,
-            'note'        => $note,
-            'invoice_id'  => $invoiceId,
-            'transfer_id' => $transferId,
-            'user_id'     => $userId,
+            'safe_id'            => $safe->id,
+            'type'               => $type,
+            'direction'          => $direction,
+            'currency_id'        => $currencyId,
+            'amount'             => $amount,
+            'reason_id'          => $reasonId,
+            'note'               => $note,
+            'invoice_id'         => $invoiceId,
+            'transfer_id'        => $transferId,
+            'salary_advance_id'  => $salaryAdvanceId,
+            'user_id'            => $userId,
         ]);
     }
 

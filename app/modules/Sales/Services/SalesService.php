@@ -792,7 +792,7 @@ class SalesService
             ->search($search)
             ->orderBy('name')
             ->limit($limit)
-            ->get(['id', 'name', 'sku', 'barcode', 'image', 'product_type', 'selling_price', 'category_id', 'scalar']);
+            ->get(['id', 'name', 'sku', 'barcode', 'image', 'product_type', 'selling_price', 'category_id', 'scalar', 'default_oil_id']);
 
         if ($products->isEmpty()) {
             return [];
@@ -810,13 +810,51 @@ class SalesService
             ->selectRaw('supply_items.product_id as pid, SUM(goods.current_quantity) as total')
             ->pluck('total', 'pid');
 
+        // Compound Products have no stock/price of their own (the Builder computes
+        // both live from whatever oil+bottle the seller picks), but if the shop has
+        // NO priced, in-stock oil or NO priced, in-stock bottle at all, no compound
+        // can be composed regardless of which one is opened — computed once here,
+        // not per-product, and only when at least one compound is in this page.
+        $compoundAvailability = $products->contains('product_type', Product::TYPE_COMPOUND)
+            ? $this->compoundComposability($shopId)
+            : null;
+
         return $products->map(fn ($p) => [
             'id' => $p->id, 'name' => $p->name, 'sku' => $p->sku, 'barcode' => $p->barcode,
             'image' => $p->image, 'product_type' => $p->product_type,
             'configured_unit_price' => $p->product_type === Product::TYPE_READY_PRODUCT ? $this->resolveConfiguredUnitPrice($p) : null,
             'shop_stock' => $p->product_type === Product::TYPE_READY_PRODUCT ? (float) ($stocks[$p->id] ?? 0) : null,
             'unit' => $p->scalar,
+            // Phase 7 — Composite Products only: a preferred oil to pre-select (never
+            // lock) in the Assemble-on-Sale dialog. Null for every other product type.
+            'default_oil_id' => $p->product_type === Product::TYPE_COMPOUND ? $p->default_oil_id : null,
+            'compound_available' => $p->product_type === Product::TYPE_COMPOUND ? $compoundAvailability['available'] : null,
+            'compound_unavailable_reason' => $p->product_type === Product::TYPE_COMPOUND ? $compoundAvailability['reason'] : null,
         ])->values()->all();
+    }
+
+    /** Whether this shop currently has at least one priced, in-stock oil AND
+     *  at least one priced, in-stock bottle — the minimum needed to compose
+     *  ANY Compound Product (the Builder lets the seller pick any oil/bottle,
+     *  there's no fixed recipe, so this check is shop-wide, not per-compound). */
+    private function compoundComposability(int $shopId): array
+    {
+        $oilAvailable = collect($this->searchOilProducts($shopId, null, 500))
+            ->contains(fn ($o) => $o['configured_unit_price'] !== null && $o['shop_stock'] > 0);
+        $bottleAvailable = collect($this->searchBottleProducts($shopId, null, 500))
+            ->contains(fn ($b) => $b['configured_unit_price'] !== null && $b['shop_stock'] > 0);
+
+        if ($oilAvailable && $bottleAvailable) {
+            return ['available' => true, 'reason' => null];
+        }
+        if (! $oilAvailable && ! $bottleAvailable) {
+            return ['available' => false, 'reason' => 'لا توجد زيوت أو زجاجات متاحة ومُسعَّرة للتركيب في هذا الفرع.'];
+        }
+        if (! $oilAvailable) {
+            return ['available' => false, 'reason' => 'لا يوجد أي زيت متاح ومُسعَّر للتركيب في هذا الفرع.'];
+        }
+
+        return ['available' => false, 'reason' => 'لا توجد أي زجاجة متاحة ومُسعَّرة للتركيب في هذا الفرع.'];
     }
 
     // ── Product Builder: raw materials priced as "oil" (per gram) ───────────
@@ -884,8 +922,10 @@ class SalesService
     //    validation. No selling price is computed or suggested here — the
     //    seller types it by hand in the Builder; oil/bottle cost + stock are
     //    informational only.
-    public function calculateCompoundPrice(int $shopId, int $catalogProductId, int $oilProductId, float $oilQty, int $bottleProductId): array
-    {
+    public function calculateCompoundPrice(
+        int $shopId, int $catalogProductId, int $oilProductId, float $oilQty, int $bottleProductId,
+        ?int $alcoholProductId = null, ?float $alcoholQty = null,
+    ): array {
         $catalog = Product::findOrFail($catalogProductId);
         $oil     = Product::with('category.productType')->findOrFail($oilProductId);
         $bottle  = Product::with('category.productType')->findOrFail($bottleProductId);
@@ -899,12 +939,36 @@ class SalesService
 
         $oilCost    = round($oilQty * $oilUnitPrice, 2);
         $bottleCost = round($bottleUnitPrice, 2);
-        $totalCost  = round($oilCost + $bottleCost, 2);
 
         $oilStock = (float) Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $oil->id))
             ->where('shop_id', $shopId)->sum('current_quantity');
         $bottleStock = (float) Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $bottle->id))
             ->where('shop_id', $shopId)->sum('current_quantity');
+
+        // Business rule: Alcohol is a real, fully-costed Raw Material — it has its own
+        // purchase cost, FIFO cost, and inventory value, exactly like Oil or Bottle
+        // (never priced at zero, never dropped from accounting). The ONLY thing that
+        // changes is that its cost is excluded from the Composite Product's COMMERCIAL
+        // pricing/profit shown to the cashier: total_cost below stays Oil + Bottle only.
+        // Its real unit price is still returned (alcohol_unit_price/alcohol_cost) so the
+        // invoice line recorded for it carries its true value, not a fake zero.
+        $alcohol = null;
+        $alcoholUnitPrice = 0.0;
+        $alcoholCost = 0.0;
+        $alcoholStock = 0.0;
+        if ($alcoholProductId && $alcoholQty !== null) {
+            $alcohol = Product::with('category.productType')->findOrFail($alcoholProductId);
+            $alcoholUnitPrice = $this->resolveConfiguredUnitPrice($alcohol) ?? 0.0;
+            $alcoholCost = round($alcoholQty * $alcoholUnitPrice, 2);
+            $alcoholStock = (float) Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $alcohol->id))
+                ->where('shop_id', $shopId)->sum('current_quantity');
+        }
+
+        // Deliberately Oil + Bottle only — this is the "commercial" cost/profit basis
+        // shown to the cashier; Alcohol's real cost (above) never enters it.
+        $totalCost = round($oilCost + $bottleCost, 2);
+        $stockOk = $oilStock >= $oilQty && $bottleStock >= 1
+            && (! $alcohol || $alcoholStock >= $alcoholQty);
 
         return [
             'oil_unit_price'    => $oilUnitPrice,
@@ -914,13 +978,38 @@ class SalesService
             'bottle_cost'       => $bottleCost,
             'bottle_stock'      => $bottleStock,
             'bottle_capacity_ml' => $bottle->capacity_ml !== null ? (float) $bottle->capacity_ml : null,
+            // Real values (never zero) — used only to record Alcohol's true cost on its
+            // own invoice line; deliberately NOT folded into total_cost/stock_ok's basis.
+            'alcohol_unit_price' => $alcohol ? $alcoholUnitPrice : null,
+            'alcohol_cost'       => $alcohol ? $alcoholCost : null,
+            'alcohol_stock'      => $alcohol ? $alcoholStock : null,
             'total_cost'        => $totalCost,
-            'stock_ok'          => $oilStock >= $oilQty && $bottleStock >= 1,
+            'stock_ok'          => $stockOk,
             // Pricing Management's stored default — pre-fills the Builder's
             // Selling Price field. Never written back here; only Pricing
             // Management can change it (see PricingService::updateSellingPrice).
             'default_selling_price' => $catalog->default_selling_price !== null ? (float) $catalog->default_selling_price : null,
         ];
+    }
+
+    // ── Product Builder: raw materials priced as "alcohol" carrier ─────────
+    // Distinct "كحول" category (Phase 8) — deliberately separate from the
+    // broader "قواعد وحوامل" bucket, which also holds non-alcohol carriers
+    // (DPG, jojoba, IPM, neutral base) that must never appear in this picker.
+    // Chosen exactly like an oil: freely, every sale, never a fixed product.
+    public function searchAlcoholProducts(int $shopId, ?string $search, int $limit = 30): mixed
+    {
+        $products = Product::query()
+            ->where('is_active', true)
+            ->where('product_type', Product::TYPE_RAW_MATERIAL)
+            ->whereHas('category', fn ($q) => $q->where('name', 'كحول'))
+            ->with(['category:id,minimum_sell_price,product_type_id', 'category.productType:id,sold_by,pricing_source,default_unit'])
+            ->search($search)
+            ->orderBy('name')
+            ->limit($limit)
+            ->get(['id', 'name', 'sku', 'scalar', 'category_id', 'selling_price']);
+
+        return $this->decorateForBuilder($products, $shopId);
     }
 
     // ── Admin: cross-shop invoice review (pending queue, etc.) ────────────────

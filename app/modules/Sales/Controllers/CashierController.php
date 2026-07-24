@@ -108,8 +108,27 @@ class CashierController extends Controller
     }
 
     /**
+     * Raw materials in the dedicated "كحول" category — Product Builder's
+     * Alcohol picker, chosen exactly like the Oil picker (freely, every sale).
+     * GET /api/sales/alcohol-products?search=96
+     */
+    public function alcoholProducts()
+    {
+        $seller = auth()->user();
+        if (! $seller->shop_id) {
+            return response()->json(['message' => 'البائع غير مرتبط بأي فرع'], 422);
+        }
+        $shopId = app(\App\Modules\Hr\Services\ActiveBranchService::class)->activeBranchId($seller) ?? (int) $seller->shop_id;
+
+        return response()->json([
+            'message' => 'ok',
+            'data'    => $this->salesService->searchAlcoholProducts($shopId, request('search')),
+        ]);
+    }
+
+    /**
      * Product Builder live price calculation + bottle-capacity validation.
-     * GET /api/sales/compound-price?catalog_product_id=&oil_product_id=&oil_qty=&bottle_product_id=
+     * GET /api/sales/compound-price?catalog_product_id=&oil_product_id=&oil_qty=&bottle_product_id=&alcohol_product_id=&alcohol_qty=
      */
     public function compoundPrice()
     {
@@ -124,6 +143,10 @@ class CashierController extends Controller
             'oil_product_id'     => ['required', 'integer', 'exists:products,id'],
             'oil_qty'            => ['required', 'numeric', 'min:0.001'],
             'bottle_product_id'  => ['required', 'integer', 'exists:products,id'],
+            // Alcohol is optional — the cashier picks bottle+oil first, the alcohol
+            // quantity suggestion (and product choice) comes after.
+            'alcohol_product_id' => ['nullable', 'integer', 'exists:products,id'],
+            'alcohol_qty'        => ['nullable', 'numeric', 'min:0.001'],
         ]);
 
         $result = $this->salesService->calculateCompoundPrice(
@@ -132,6 +155,8 @@ class CashierController extends Controller
             (int) $data['oil_product_id'],
             (float) $data['oil_qty'],
             (int) $data['bottle_product_id'],
+            isset($data['alcohol_product_id']) ? (int) $data['alcohol_product_id'] : null,
+            isset($data['alcohol_qty']) ? (float) $data['alcohol_qty'] : null,
         );
 
         return response()->json(['message' => 'ok', 'data' => $result]);

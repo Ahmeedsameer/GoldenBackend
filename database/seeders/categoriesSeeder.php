@@ -3,6 +3,7 @@
 namespace Database\Seeders;
 
 use App\Models\Category;
+use App\Models\ProductType;
 use Illuminate\Database\Seeder;
 
 class categoriesSeeder extends Seeder
@@ -24,6 +25,15 @@ class categoriesSeeder extends Seeder
      */
     public function run(): void
     {
+        // Every category MUST link to a ProductType — this is what drives
+        // pricing_source ('category' = priced per-gram/ml at the category level,
+        // e.g. oils; 'product' = each product has its own price) everywhere
+        // downstream (Sales Catalog, Assemble-on-Sale Oil/Bottle/Alcohol pickers).
+        $oilType       = ProductType::where('code', 'oil')->firstOrFail();
+        $bottleType    = ProductType::where('code', 'bottle')->firstOrFail();
+        $accessoryType = ProductType::where('code', 'accessory')->firstOrFail();
+        $packagingType = ProductType::where('code', 'packaging')->firstOrFail();
+
         $categories = [
             // ── Fixed-price categories ────────────────────────────────────────
             // Bottles/tools have a clear, standard retail price per piece
@@ -33,6 +43,7 @@ class categoriesSeeder extends Seeder
                 'minimum_sell_price' => 15.00,
                 'is_fixed'           => true,
                 'value_percentage'   => null,
+                'product_type_id'    => $bottleType->id,
             ],
             // Packaging items (boxes, bags, labels) also fixed
             [
@@ -41,6 +52,7 @@ class categoriesSeeder extends Seeder
                 'minimum_sell_price' => 5.00,
                 'is_fixed'           => true,
                 'value_percentage'   => null,
+                'product_type_id'    => $packagingType->id,
             ],
 
             // ── Weighted (non-fixed) categories ──────────────────────────────
@@ -51,6 +63,7 @@ class categoriesSeeder extends Seeder
                 'minimum_sell_price' => 150.00,
                 'is_fixed'           => false,
                 'value_percentage'   => 55.00,
+                'product_type_id'    => $accessoryType->id,
             ],
             // Raw fragrance oil concentrates: very high value per ml
             [
@@ -59,6 +72,7 @@ class categoriesSeeder extends Seeder
                 'minimum_sell_price' => 8.00,
                 'is_fixed'           => false,
                 'value_percentage'   => 40.00,
+                'product_type_id'    => $oilType->id,
             ],
             // Oud and incense: sold by gram, high value
             [
@@ -67,14 +81,27 @@ class categoriesSeeder extends Seeder
                 'minimum_sell_price' => 15.00,
                 'is_fixed'           => false,
                 'value_percentage'   => 50.00,
+                'product_type_id'    => $accessoryType->id,
             ],
-            // Carrier bases and solvents: low cost per ml, bulk quantities
+            // Carrier bases and solvents (non-alcohol): low cost per ml, bulk quantities
             [
                 'name'               => 'قواعد وحوامل',
-                'description'        => 'كحول عطري، DPG، جوجوبا، وقواعد التخفيف — بالمليليتر',
+                'description'        => 'DPG، جوجوبا، وقواعد التخفيف — بالمليليتر',
                 'minimum_sell_price' => 0.50,
                 'is_fixed'           => false,
                 'value_percentage'   => 5.00,
+                'product_type_id'    => $accessoryType->id,
+            ],
+            // Alcohol — kept separate from other carrier bases (Phase 8): it's a real,
+            // fully-costed Raw Material with its own FIFO/inventory value, but must
+            // never mix with non-alcohol carriers in the Assemble-on-Sale Alcohol picker.
+            [
+                'name'               => 'كحول',
+                'description'        => 'الكحول العطري المستخدم كمذيب في تركيب العطور — مستقل عن باقي القواعد والحوامل.',
+                'minimum_sell_price' => 0.50,
+                'is_fixed'           => false,
+                'value_percentage'   => 5.00,
+                'product_type_id'    => $accessoryType->id,
             ],
         ];
 

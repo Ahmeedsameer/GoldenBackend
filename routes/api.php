@@ -119,7 +119,15 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
     // Listing itself is registered outside this admin-only group — see below —
     // since branch managers also need to read the product catalog for transfers.
     Route::group(['prefix' => 'products'], function () {
-        Route::post('',       [ProductController::class, 'store']);
+        // Four independent Product Creation Forms — each its own request
+        // class/validation, called from its own dedicated frontend page.
+        // (No generic POST '' create route — superseded entirely by these four.)
+        Route::post('raw-materials',   [ProductController::class, 'storeRawMaterial']);
+        Route::post('packaging',       [ProductController::class, 'storePackaging']);
+        Route::post('ready-products',  [ProductController::class, 'storeReadyProduct']);
+        Route::post('compounds',       [ProductController::class, 'storeCompound']);
+        // Registered before the {id} wildcard so the literal path always wins.
+        Route::get('oil-options', [ProductController::class, 'oilOptions']);
         Route::get('{id}',    [ProductController::class, 'show']);
         Route::put('{id}',    [ProductController::class, 'update']);
         Route::delete('{id}', [ProductController::class, 'destroy']);
@@ -326,6 +334,10 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::put('advances/{id}/cancel',      [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'cancel']);
         Route::put('advances/{id}/plan',        [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'updatePlan']);
         Route::post('advances/{id}/repayments', [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'storeRepayment']);
+
+        // Phase 6.3 — dedicated Salary Advance report (admin only)
+        Route::get('reports/advances/export', [\App\Modules\Hr\Controllers\SalaryAdvanceReportController::class, 'export']);
+        Route::get('reports/advances',        [\App\Modules\Hr\Controllers\SalaryAdvanceReportController::class, 'data']);
 
         // Deduction settings (configurable)
         Route::get('deduction-settings',       [\App\Modules\Hr\Controllers\DeductionSettingController::class, 'index']);
@@ -577,6 +589,7 @@ Route::group(['middleware' => ['api', CheckRole::class . ':sales,manager']], fun
         Route::get('catalog-products', [CashierController::class, 'catalogProducts']);
         Route::get('oil-products', [CashierController::class, 'oilProducts']);
         Route::get('bottle-products', [CashierController::class, 'bottleProducts']);
+        Route::get('alcohol-products', [CashierController::class, 'alcoholProducts']);
         Route::get('compound-price', [CashierController::class, 'compoundPrice']);
         Route::get('products/{id}/components', [CashierController::class, 'productComponents']);
         Route::get('categories',  [CashierController::class, 'getCategories']);

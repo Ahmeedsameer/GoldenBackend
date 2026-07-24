@@ -57,33 +57,33 @@
 
     <table class="meta-grid">
         <tr>
-            <td class="label">رقم طلب النقل</td>
+            <td class="label">{{ $labels['request_number'] }}</td>
             <td>{{ $transfer->request_number }}</td>
-            <td class="label">الحالة</td>
+            <td class="label">{{ $labels['status'] }}</td>
             <td>{{ $statusLabel }}</td>
         </tr>
         <tr>
-            <td class="label">نوع النقل</td>
+            <td class="label">{{ $labels['transfer_type'] }}</td>
             <td>{{ $transferType }}</td>
-            <td class="label">الأولوية</td>
-            <td>{{ $transfer->priority }}</td>
+            <td class="label">{{ $labels['priority'] }}</td>
+            <td>{{ $priorityLabel }}</td>
         </tr>
         <tr>
-            <td class="label">من فرع</td>
+            <td class="label">{{ $labels['from_branch'] }}</td>
             <td>{{ $sourceShopName }}</td>
-            <td class="label">إلى فرع</td>
+            <td class="label">{{ $labels['to_branch'] }}</td>
             <td>{{ $destinationShopName }}</td>
         </tr>
         <tr>
-            <td class="label">طلب بواسطة</td>
+            <td class="label">{{ $labels['requested_by'] }}</td>
             <td>{{ $requestedByName }}</td>
-            <td class="label">اعتمد بواسطة</td>
+            <td class="label">{{ $labels['approved_by'] }}</td>
             <td>{{ $approvedByName }}</td>
         </tr>
         <tr>
-            <td class="label">شحن بواسطة</td>
+            <td class="label">{{ $labels['shipped_by'] }}</td>
             <td>{{ $shippedByName }}</td>
-            <td class="label">استلم بواسطة</td>
+            <td class="label">{{ $labels['received_by'] }}</td>
             <td>{{ $receivedByName }}</td>
         </tr>
     </table>
@@ -91,15 +91,15 @@
     <table class="items">
         <thead>
             <tr>
-                <th>مفقود</th>
-                <th>تالف</th>
-                <th>الكمية المستلمة</th>
-                <th>الكمية المشحونة</th>
-                <th>الكمية المعتمدة</th>
-                <th>الكمية المطلوبة</th>
-                <th>تكلفة الوحدة</th>
-                <th>الوحدة</th>
-                <th class="product-cell">المنتج</th>
+                <th>{{ $labels['th_missing'] }}</th>
+                <th>{{ $labels['th_damaged'] }}</th>
+                <th>{{ $labels['th_received_qty'] }}</th>
+                <th>{{ $labels['th_shipped_qty'] }}</th>
+                <th>{{ $labels['th_approved_qty'] }}</th>
+                <th>{{ $labels['th_requested_qty'] }}</th>
+                <th>{{ $labels['th_unit_cost'] }}</th>
+                <th>{{ $labels['th_unit'] }}</th>
+                <th class="product-cell">{{ $labels['th_product'] }}</th>
             </tr>
         </thead>
         <tbody>
@@ -116,19 +116,19 @@
                     <td class="product-cell">{{ $item['product_name'] }} ({{ $item['sku'] }})</td>
                 </tr>
             @empty
-                <tr><td colspan="9">لا توجد أصناف</td></tr>
+                <tr><td colspan="9">{{ $labels['no_items'] }}</td></tr>
             @endforelse
         </tbody>
     </table>
 
     <table class="totals">
         <tr>
-            <td class="label">القيمة المرجعية</td>
-            <td>{{ number_format((float) $invoice->reference_value, 2) }} ج.م</td>
+            <td class="label">{{ $labels['reference_value'] }}</td>
+            <td>{{ number_format((float) $invoice->reference_value, 2) }} {{ $labels['currency'] }}</td>
         </tr>
         @if ($notes)
             <tr>
-                <td class="label">ملاحظات</td>
+                <td class="label">{{ $labels['notes'] }}</td>
                 <td>{{ $notes }}</td>
             </tr>
         @endif
@@ -139,13 +139,13 @@
             <td>
                 <div class="sig-box">
                     <div class="sig-name">{{ $shippedByName }}</div>
-                    توقيع المُسلّم
+                    {{ $labels['sig_shipper'] }}
                 </div>
             </td>
             <td>
                 <div class="sig-box">
                     <div class="sig-name">{{ $receivedByName }}</div>
-                    توقيع المستلم
+                    {{ $labels['sig_receiver'] }}
                 </div>
             </td>
         </tr>

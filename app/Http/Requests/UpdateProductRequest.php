@@ -42,6 +42,17 @@ class UpdateProductRequest extends FormRequest
             'product_type'      => ['sometimes', 'nullable', Rule::in(Product::PRODUCT_TYPES)],
             'show_in_catalog'   => 'sometimes|nullable|in:true,false,1,0',
             'capacity_ml'       => 'sometimes|nullable|numeric|min:0',
+            'default_oil_id'    => [
+                'sometimes', 'nullable', 'integer', 'exists:products,id',
+                function ($attribute, $value, $fail) {
+                    if ($value && ! Product::where('id', $value)
+                        ->where('product_type', Product::TYPE_RAW_MATERIAL)
+                        ->whereHas('category.productType', fn ($q) => $q->where('pricing_source', 'category'))
+                        ->exists()) {
+                        $fail('الزيت الافتراضي يجب أن يكون مادة خام من فئة زيوت.');
+                    }
+                },
+            ],
         ];
     }
 

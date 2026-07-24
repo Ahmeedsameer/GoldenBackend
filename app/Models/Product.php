@@ -29,6 +29,7 @@ class Product extends Model
         'priced_cost',
         'priced_at',
         'notes',
+        'default_oil_id',
     ];
 
     /**
@@ -82,6 +83,17 @@ class Product extends Model
     public function components()
     {
         return $this->hasMany(ProductComponent::class, 'product_id');
+    }
+
+    /**
+     * Phase 7 — Composite Products only: a preferred/default oil, used purely
+     * to pre-select the oil dropdown in the Assemble-on-Sale dialog. NOT a
+     * recipe — no quantity, no bottle/sprayer/cap is ever stored here, and
+     * the cashier is always free to pick a different oil at sale time.
+     */
+    public function defaultOil()
+    {
+        return $this->belongsTo(Product::class, 'default_oil_id');
     }
 
     /** Pricing Management audit trail — every cost refresh / selling-price edit. */
