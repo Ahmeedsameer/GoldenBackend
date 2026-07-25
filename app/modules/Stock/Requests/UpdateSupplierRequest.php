@@ -16,9 +16,15 @@ class UpdateSupplierRequest extends FormRequest
         $supplierId = $this->route('id');
 
         return [
-            'name'  => 'sometimes|required|string|max:255',
-            'phone' => 'sometimes|required|string|max:20|unique:suppliers,phone,' . $supplierId,
-            'notes' => 'nullable|string',
+            'name'                 => 'sometimes|required|string|max:255',
+            'phone'                => 'sometimes|required|string|max:20|unique:suppliers,phone,' . $supplierId,
+            'address'              => 'sometimes|required|string|max:255',
+            'bank_account_number'  => 'nullable|string|max:100',
+            'mobile_wallet'        => 'nullable|string|max:100',
+            'instapay'             => 'nullable|string|max:100',
+            'iban'                 => 'nullable|string|max:100',
+            'opening_balance'      => 'nullable|numeric|min:0',
+            'notes'                => 'nullable|string',
         ];
     }
 

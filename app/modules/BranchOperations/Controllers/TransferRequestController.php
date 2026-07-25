@@ -52,6 +52,15 @@ class TransferRequestController extends Controller
                 $sq->where('source_shop_id', $shopId)->orWhere('destination_shop_id', $shopId);
             });
         }
+        // Stock Requests view — every transfer sourced FROM the Main Warehouse
+        // (i.e. every Stock Request, whether created via the dedicated
+        // storeStockRequest() entry point or an ordinary warehouse-source
+        // transfer). Deliberately exact on source only (not "either side"
+        // like shop_id above), since a Stock Request is never the warehouse
+        // as destination.
+        if ($request->boolean('warehouse_source')) {
+            $q->where('source_shop_id', $this->warehouse->warehouseShopId());
+        }
 
         return $q;
     }
@@ -106,6 +115,43 @@ class TransferRequestController extends Controller
             : 'تم إنشاء طلب النقل بنجاح';
 
         return response()->json(['message' => $message, 'data' => $transfer], 201);
+    }
+
+    /**
+     * POST /branch-operations/stock-requests — Branch Manager entry point.
+     * NOT a new subsystem: it's a guarded, simplified wrapper around the
+     * exact same store()/create() used by ordinary transfers. It hard-locks
+     * source_shop_id to the Main Warehouse (a manager can never request stock
+     * from anywhere else, and can never pick a different destination — both
+     * enforced server-side, not just hidden in the UI) and always submits
+     * immediately (a Stock Request has no "draft" concept). Everything after
+     * that — the submitted→approved/rejected gate (already admin-only for a
+     * warehouse source via canApproveShop()), FIFO on ship/receive, the
+     * Internal Transfer Invoice, and every transfer/warehouse report — is the
+     * existing TransferRequest machinery, completely untouched.
+     */
+    public function storeStockRequest(Request $request)
+    {
+        $user = $request->user();
+        if ($user->role !== 'manager' || ! $user->shop_id) {
+            abort(403, 'طلبات المخزون تُنشأ من قبل مدير الفرع فقط.');
+        }
+
+        $data = $request->validate([
+            'requested_date' => 'nullable|date',
+            'priority'       => 'nullable|in:' . implode(',', TransferRequest::PRIORITIES),
+            'notes'          => 'nullable|string',
+            'items'          => 'required|array|min:1',
+            'items.*.product_id'          => 'required|integer|exists:products,id',
+            'items.*.requested_quantity'  => 'required|numeric|min:0.001',
+        ]);
+
+        $data['source_shop_id']      = $this->warehouse->warehouseShopId();
+        $data['destination_shop_id'] = $user->shop_id;
+
+        $transfer = $this->service->create($data, $user, true);
+
+        return response()->json(['message' => 'تم إرسال طلب المخزون بنجاح، بانتظار موافقة الإدارة', 'data' => $transfer], 201);
     }
 
     public function submit(Request $request, int $id)
@@ -176,6 +222,30 @@ class TransferRequestController extends Controller
         $this->service->receive($transfer, $request->user(), $data['items'], $data['notes'] ?? null);
 
         return response()->json(['message' => 'تم استلام طلب النقل', 'data' => $this->fullReload($request, $id)]);
+    }
+
+    /**
+     * POST /branch-operations/transfers/{id}/receiving-waste — turns
+     * missing_quantity/damaged_quantity already reported at receive() into
+     * real WasteRecord rows (see TransferRequestService::registerReceivingWaste
+     * for why this never touches Goods). Destination-shop manager only (or
+     * admin) — the same authority as receive() itself, since this is a
+     * direct follow-up to that action.
+     */
+    public function registerReceivingWaste(Request $request, int $id)
+    {
+        $data = $request->validate([
+            'entries' => 'required|array|min:1',
+            'entries.*.item_id' => 'required|integer|exists:transfer_request_items,id',
+            'entries.*.reason' => 'required|in:' . implode(',', \App\Modules\BranchOperations\Models\WasteRecord::REASONS),
+            'entries.*.notes' => 'nullable|string',
+        ]);
+
+        $transfer = TransferRequest::with('items.product', 'items.batches')->findOrFail($id);
+        $this->assertActsForShop($request->user(), $transfer->destination_shop_id, 'فرع الوجهة (المُستلِم)');
+        $this->service->registerReceivingWaste($transfer, $request->user(), $data['entries']);
+
+        return response()->json(['message' => 'تم تسجيل الهالك بنجاح', 'data' => $this->fullReload($request, $id)]);
     }
 
     public function close(Request $request, int $id)

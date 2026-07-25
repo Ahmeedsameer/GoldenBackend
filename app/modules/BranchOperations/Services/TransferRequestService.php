@@ -9,7 +9,9 @@ use App\Modules\BranchOperations\Models\TransferRequest;
 use App\Modules\BranchOperations\Models\TransferRequestItem;
 use App\Modules\BranchOperations\Models\TransferRequestItemBatch;
 use App\Modules\BranchOperations\Models\InternalTransferInvoice;
+use App\Modules\BranchOperations\Models\WasteRecord;
 use App\Modules\Convention\Services\NotificationService;
+use App\Modules\BranchOperations\Services\WasteService;
 use App\Services\WarehouseResolver;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -39,7 +41,11 @@ class TransferRequestService
         TransferRequest::STATUS_SUBMITTED, TransferRequest::STATUS_APPROVED, TransferRequest::STATUS_PREPARING,
     ];
 
-    public function __construct(private NotificationService $notifications, private WarehouseResolver $warehouse) {}
+    public function __construct(
+        private NotificationService $notifications,
+        private WarehouseResolver $warehouse,
+        private WasteService $wasteService,
+    ) {}
 
     /**
      * Phase 5.4 — routes each event to the specific party who must act or
@@ -408,37 +414,10 @@ class TransferRequestService
                 }
 
                 // Credit the destination shop from the same batches this item was shipped from, oldest first.
-                $remainingToCredit = $received;
-                foreach ($item->batches()->orderBy('id')->lockForUpdate()->get() as $batch) {
-                    if ($remainingToCredit <= 0) {
-                        break;
-                    }
-                    $creditable = min((float) $batch->quantity_shipped - (float) $batch->quantity_received, $remainingToCredit);
-                    if ($creditable <= 0) {
-                        continue;
-                    }
-
-                    $destinationGoodsShopId = $this->warehouse->goodsShopId($transfer->destination_shop_id);
-                    $sourceGoods = $batch->goods;
-                    $destination = Goods::where('supply_item_id', $sourceGoods->supply_item_id)
-                        ->where('shop_id', $destinationGoodsShopId)
-                        ->lockForUpdate()
-                        ->first();
-
-                    if ($destination) {
-                        $destination->increment('current_quantity', $creditable);
-                    } else {
-                        Goods::create([
-                            'supply_item_id' => $sourceGoods->supply_item_id,
-                            'shop_id' => $destinationGoodsShopId,
-                            'current_quantity' => $creditable,
-                            'date' => now()->toDateString(),
-                        ]);
-                    }
-
-                    $batch->increment('quantity_received', $creditable);
-                    $remainingToCredit = round($remainingToCredit - $creditable, 3);
-                }
+                // Only the GOOD quantity — missing/damaged are deliberately never credited here (they'd be
+                // indistinguishable from sellable stock); see registerReceivingWaste() for how that discrepancy
+                // is captured instead, in a way that never leaves bad stock looking available.
+                $this->creditBatchesToDestination($transfer, $item, $received);
 
                 $item->update([
                     'received_quantity' => $received,
@@ -458,6 +437,120 @@ class TransferRequestService
             $this->notify($transfer, 'تم استلام طلب النقل', "تم استلام طلب النقل {$transfer->request_number} في {$transfer->destinationShop->name}", 'received');
 
             return $transfer->fresh();
+        });
+    }
+
+    /** Credits a receiving item's GOOD quantity to the destination shop, drawn from the exact same shipped batches, oldest first — shared by receive() only (registerReceivingWaste() deliberately never calls this; see its own docblock for why). */
+    private function creditBatchesToDestination(TransferRequest $transfer, TransferRequestItem $item, float $quantity): void
+    {
+        $remainingToCredit = $quantity;
+        foreach ($item->batches()->orderBy('id')->lockForUpdate()->get() as $batch) {
+            if ($remainingToCredit <= 0) {
+                break;
+            }
+            $creditable = min((float) $batch->quantity_shipped - (float) $batch->quantity_received, $remainingToCredit);
+            if ($creditable <= 0) {
+                continue;
+            }
+
+            $destinationGoodsShopId = $this->warehouse->goodsShopId($transfer->destination_shop_id);
+            $sourceGoods = $batch->goods;
+            $destination = Goods::where('supply_item_id', $sourceGoods->supply_item_id)
+                ->where('shop_id', $destinationGoodsShopId)
+                ->lockForUpdate()
+                ->first();
+
+            if ($destination) {
+                $destination->increment('current_quantity', $creditable);
+            } else {
+                Goods::create([
+                    'supply_item_id' => $sourceGoods->supply_item_id,
+                    'shop_id' => $destinationGoodsShopId,
+                    'current_quantity' => $creditable,
+                    'date' => now()->toDateString(),
+                ]);
+            }
+
+            $batch->increment('quantity_received', $creditable);
+            $remainingToCredit = round($remainingToCredit - $creditable, 3);
+        }
+    }
+
+    /**
+     * Turns missing/damaged quantity reported at receive() time into a real,
+     * reportable WasteRecord — otherwise it's just a bare number sitting on
+     * the transfer item, invisible to إدارة الهالك/تقارير الهالك.
+     *
+     * Deliberately does NOT touch Goods at all: that quantity was already
+     * removed from the SOURCE shop's stock at ship() time and was never
+     * credited to the destination (see receive()'s comment) — there is no
+     * live stock anywhere left to decrement, so this never routes through
+     * WasteService::register() (which requires decrementing a shop's
+     * current_quantity). The waste is attributed to the SOURCE shop, since
+     * that is whose books actually absorbed the loss. WasteRecordBatch rows
+     * are still written directly against the original shipped batches, so
+     * this waste has the exact same Waste → Supplier traceability as every
+     * other waste record — just without a second, redundant Goods movement.
+     *
+     * One entry per flagged item, covering that item's FULL missing+damaged
+     * total in a single reason — kept deliberately simple; if a business
+     * genuinely needs to split one item's shortage across two different
+     * reasons, they can still use the normal إدارة الهالك screen directly.
+     * Guarded to run at most once per transfer (checked via the transfer's
+     * own log, no new column needed).
+     *
+     * @param array<int, array{item_id:int, reason:string, notes?:string}> $entries
+     * @return \App\Modules\BranchOperations\Models\WasteRecord[]
+     */
+    public function registerReceivingWaste(TransferRequest $transfer, User $user, array $entries): array
+    {
+        if (! in_array($transfer->status, [TransferRequest::STATUS_RECEIVED, TransferRequest::STATUS_CLOSED], true)) {
+            abort(422, 'يجب استلام الطلب أولاً قبل تسجيل الهالك الناتج عنه.');
+        }
+        if ($transfer->logs()->where('action', 'receiving_waste_registered')->exists()) {
+            abort(422, 'تم تسجيل هالك الاستلام لهذا الطلب مسبقاً.');
+        }
+
+        return DB::transaction(function () use ($transfer, $user, $entries) {
+            $created = [];
+            foreach ($entries as $entry) {
+                $item = $transfer->items()->with(['product', 'batches'])->findOrFail($entry['item_id']);
+                $quantity = round((float) $item->missing_quantity + (float) $item->damaged_quantity, 3);
+                if ($quantity <= 0) {
+                    continue;
+                }
+
+                $estimatedValue = $quantity * (float) ($item->product->purchase_cost ?? 0);
+                $waste = WasteRecord::create([
+                    'shop_id' => $transfer->source_shop_id,
+                    'product_id' => $item->product_id,
+                    'quantity' => $quantity,
+                    'reason' => $entry['reason'],
+                    'user_id' => $user->id,
+                    'date' => now()->toDateString(),
+                    'estimated_value' => round($estimatedValue, 2),
+                    'notes' => trim(($entry['notes'] ?? '') . " — من استلام طلب النقل {$transfer->request_number}"),
+                ]);
+
+                foreach ($item->batches as $batch) {
+                    $unreceived = round((float) $batch->quantity_shipped - (float) $batch->quantity_received, 3);
+                    if ($unreceived <= 0) {
+                        continue;
+                    }
+                    \App\Modules\BranchOperations\Models\WasteRecordBatch::create([
+                        'waste_record_id' => $waste->id,
+                        'goods_id' => $batch->goods_id,
+                        'quantity' => $unreceived,
+                        'created_at' => now(),
+                    ]);
+                }
+
+                $created[] = $waste;
+            }
+
+            $this->log($transfer, $user, 'receiving_waste_registered', $transfer->status, $transfer->status, 'تسجيل هالك ناتج عن نواقص/تلفيات الاستلام');
+
+            return $created;
         });
     }
 

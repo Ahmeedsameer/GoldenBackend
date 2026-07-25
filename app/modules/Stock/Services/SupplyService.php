@@ -4,6 +4,7 @@ namespace App\Modules\Stock\Services;
 
 use App\Models\Goods;
 use App\Models\Product;
+use App\Models\Safe;
 use App\Models\Supply;
 use App\Models\SupplyItem;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
@@ -11,7 +12,7 @@ use Illuminate\Support\Facades\DB;
 
 class SupplyService
 {
-    public function __construct(private InventoryAlertService $alerts) {}
+    public function __construct(private InventoryAlertService $alerts, private SupplierPaymentService $payments) {}
 
     public function getAll(array $filters = [], int $perPage = 15): LengthAwarePaginator
     {
@@ -113,17 +114,36 @@ class SupplyService
 
     /**
      * إنشاء توريد مع أصنافه وإضافتها تلقائياً إلى المستودع الرئيسي.
+     *
+     * A Supply row IS a purchase invoice — `invoice_number` is auto-generated
+     * (same insert-then-update pattern as TransferRequest's request_number)
+     * unless the admin supplies their own. `discount`/`tax` are stored as
+     * entered; total/remaining are always derived (see Supply model).
+     *
+     * If `payment_method === 'immediate'` and a `safe_id` is given, the full
+     * invoice total is paid in full right here, through the exact same
+     * SupplierPaymentService (and therefore SafeService) an admin would use
+     * from the supplier's ledger later — closing the gap where "immediate"
+     * used to be a label with no actual money movement. `payment_method`
+     * itself is otherwise no longer read — `payment_status` (derived from
+     * paid_amount) is now the real source of truth.
      */
-    public function create(array $data): Supply
+    public function create(array $data, \App\Models\User $user): Supply
     {
-        $supply = DB::transaction(function () use ($data) {
+        $supply = DB::transaction(function () use ($data, $user) {
             // 1. إنشاء سجل التوريد — التاريخ يُولَّد دائماً من الخادم (لا يُدخله المستخدم)
             $today = now()->toDateString();
             $supply = Supply::create([
                 'supplier_id'    => $data['supplier_id'],
                 'date'           => $today,
                 'payment_method' => $data['payment_method'],
+                'invoice_number' => $data['invoice_number'] ?? ('PUR-' . now()->format('Ymd') . '-000000'),
+                'discount'       => $data['discount'] ?? 0,
+                'tax'            => $data['tax'] ?? 0,
             ]);
+            if (empty($data['invoice_number'])) {
+                $supply->update(['invoice_number' => 'PUR-' . now()->format('Ymd') . '-' . str_pad((string) $supply->id, 4, '0', STR_PAD_LEFT)]);
+            }
 
             // 2. إنشاء كل صنف وإضافة كميته إلى المستودع الرئيسي تلقائياً
             foreach ($data['items'] as $item) {
@@ -160,7 +180,22 @@ class SupplyService
                 }
             }
 
-            return $supply->load(['supplier:id,name,phone', 'items.product:id,name,scalar']);
+            $supply->load(['supplier:id,name,phone', 'items.product:id,name,scalar']);
+
+            // "Immediate" now actually pays — the full invoice total, right
+            // now, from whichever Safe the admin picked. Only when a safe_id
+            // was actually given: an admin who picks "immediate" without
+            // choosing a safe is just leaving payment_method as a label (old
+            // behavior), same as picking "debt" — they can still pay properly
+            // later from the supplier's ledger, which uses this identical path.
+            if (($data['payment_method'] ?? null) === 'immediate' && !empty($data['safe_id'])) {
+                $safe = Safe::findOrFail($data['safe_id']);
+                $currencyId = $data['currency_id'] ?? \App\Models\Currency::where('code', 'EGP')->value('id');
+                $this->payments->pay($supply, $safe, (int) $currencyId, $supply->total_amount, $user, 'دفع فوري عند التوريد');
+                $supply->refresh();
+            }
+
+            return $supply;
         });
 
         // Supplies land in the main warehouse (shop_id = null) — refresh alert

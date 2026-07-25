@@ -49,6 +49,8 @@ use App\Modules\Sales\Controllers\ReportsController;
 use App\Modules\Stock\Controllers\InventoryController;
 use App\Modules\Stock\Controllers\ManagerInventoryController;
 use App\Modules\Stock\Controllers\SupplierController;
+use App\Modules\Stock\Controllers\SupplierPaymentController;
+use App\Modules\Stock\Controllers\SupplierReportController;
 use App\Modules\Stock\Controllers\SupplyController;
 
 
@@ -181,6 +183,25 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::get('suppliers/{id}/profile/products',  [SupplierController::class, 'profileProducts']);
         Route::get('suppliers/{id}/profile/analytics', [SupplierController::class, 'profileAnalytics']);
         Route::get('suppliers/{id}/profile/export',    [SupplierController::class, 'exportProfile']);
+
+        // Supplier Contacts — no limit per supplier
+        Route::get('suppliers/{id}/contacts',                [SupplierController::class, 'contacts']);
+        Route::post('suppliers/{id}/contacts',                [SupplierController::class, 'storeContact']);
+        Route::put('suppliers/{id}/contacts/{contactId}',     [SupplierController::class, 'updateContact']);
+        Route::delete('suppliers/{id}/contacts/{contactId}',  [SupplierController::class, 'destroyContact']);
+
+        // Supplier Ledger — purchase history, payment history, balances (own page/tab)
+        Route::get('suppliers/{id}/ledger', [SupplierController::class, 'ledger']);
+
+        // Supplier Payments — always against exactly one invoice; money moves through the existing Safe system
+        Route::get('supplier-payments',  [SupplierPaymentController::class, 'index']);
+        Route::post('supplier-payments', [SupplierPaymentController::class, 'store']);
+
+        // Supplier Reports (cross-supplier) — registered before any suppliers/{id}/* wildcard so the literal path always wins
+        Route::get('suppliers/reports/balances',    [SupplierReportController::class, 'balances']);
+        Route::get('suppliers/reports/outstanding', [SupplierReportController::class, 'outstanding']);
+        Route::get('suppliers/reports/purchases',   [SupplierReportController::class, 'purchases']);
+        Route::get('suppliers/reports/payments',    [SupplierReportController::class, 'payments']);
 
         // Supplies
         Route::get('supplier-intelligence',     [SupplyController::class, 'supplierIntelligence']);
@@ -393,10 +414,13 @@ Route::group(['middleware' => ['api', CheckRole::class . ':manager'], 'prefix' =
     Route::get('override-requests',      [ManagerOverrideController::class, 'index']);
     Route::put('override-requests/{id}', [ManagerOverrideController::class, 'respond']);
 
-    // ── Inventory & inter-branch transfers ────────────────────────────────────
-    Route::get('inventory',           [ManagerInventoryController::class, 'index']);
-    Route::get('shops',               [ManagerInventoryController::class, 'shops']);
-    Route::post('inventory/transfer', [ManagerInventoryController::class, 'transfer']);
+    // ── Inventory (view only) ─────────────────────────────────────────────────
+    // A manager can see their own branch's stock, but can never move it
+    // directly — the only legitimate way stock enters/leaves a branch is the
+    // Stock Request / Transfer Request workflow (branch-operations/transfers,
+    // branch-operations/stock-requests). The old instant "manager inventory
+    // transfer" endpoint is removed on purpose, not merely hidden.
+    Route::get('inventory', [ManagerInventoryController::class, 'index']);
 
     // ── Analytics & reports ───────────────────────────────────────────────────
     Route::get('reports/sales',                [ReportsController::class, 'salesSummary']);
@@ -476,10 +500,19 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'pre
     Route::post('{id}/prepare',     [TransferRequestController::class, 'prepare']); // source-shop manager (or admin for the warehouse)
     Route::post('{id}/ship',        [TransferRequestController::class, 'ship']); // source-shop manager (or admin for the warehouse)
     Route::post('{id}/receive',     [TransferRequestController::class, 'receive']); // destination-shop manager (or admin for the warehouse)
+    Route::post('{id}/receiving-waste', [TransferRequestController::class, 'registerReceivingWaste']); // destination-shop manager (or admin)
     Route::post('{id}/close',       [TransferRequestController::class, 'close']); // either side's manager, or admin
 });
 Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'branch-operations/transfers'], function () {
     Route::post('{id}/cancel',      [TransferRequestController::class, 'cancel']);
+});
+
+// ── Stock Requests — a Branch Manager entry point onto the SAME TransferRequest
+// engine above (source hard-locked to the Main Warehouse server-side). Reading
+// the resulting requests uses the existing GET branch-operations/transfers
+// endpoint with ?warehouse_source=1 — no separate list/detail/report endpoint.
+Route::group(['middleware' => ['api', CheckRole::class . ':manager'], 'prefix' => 'branch-operations/stock-requests'], function () {
+    Route::post('', [TransferRequestController::class, 'storeStockRequest']);
 });
 
 // ── Waste Management (Part 7) — read: all roles (shop-scoped); register: admin+manager ──

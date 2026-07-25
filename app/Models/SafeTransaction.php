@@ -21,6 +21,7 @@ class SafeTransaction extends Model
         'transfer_out'         => 'out',
         'advance_disbursement' => 'out',
         'advance_repayment'    => 'in',
+        'supplier_payment'     => 'out',
     ];
 
     protected $fillable = [
@@ -34,6 +35,7 @@ class SafeTransaction extends Model
         'invoice_id',
         'transfer_id',
         'salary_advance_id',
+        'supplier_payment_id',
         'user_id',
     ];
 
@@ -67,6 +69,11 @@ class SafeTransaction extends Model
     public function salaryAdvance(): BelongsTo
     {
         return $this->belongsTo(SalaryAdvance::class);
+    }
+
+    public function supplierPayment(): BelongsTo
+    {
+        return $this->belongsTo(SupplierPayment::class);
     }
 
     public function user(): BelongsTo

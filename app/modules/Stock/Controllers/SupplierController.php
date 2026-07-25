@@ -4,6 +4,8 @@ namespace App\Modules\Stock\Controllers;
 
 use App\Http\Controllers\Controller;
 use App\Models\Supplier;
+use App\Models\SupplierContact;
+use App\Modules\Stock\Requests\StoreSupplierContactRequest;
 use App\Modules\Stock\Requests\StoreSupplierRequest;
 use App\Modules\Stock\Requests\UpdateSupplierRequest;
 use App\Modules\Stock\Services\SupplierProfileService;
@@ -115,5 +117,47 @@ class SupplierController extends Controller
         return response()->json([
             'message' => 'تم حذف المورد بنجاح',
         ]);
+    }
+
+    // ── Contacts — no limit per supplier ──────────────────────────────────────
+
+    public function contacts(string $id)
+    {
+        $supplier = Supplier::findOrFail($id);
+
+        return response()->json(['message' => 'ok', 'data' => $this->supplierService->listContacts($supplier)]);
+    }
+
+    public function storeContact(StoreSupplierContactRequest $request, string $id)
+    {
+        $supplier = Supplier::findOrFail($id);
+        $contact = $this->supplierService->addContact($supplier, $request->validated());
+
+        return response()->json(['message' => 'تمت إضافة جهة الاتصال بنجاح', 'data' => $contact], 201);
+    }
+
+    public function updateContact(StoreSupplierContactRequest $request, string $id, string $contactId)
+    {
+        $contact = SupplierContact::where('supplier_id', $id)->findOrFail($contactId);
+        $updated = $this->supplierService->updateContact($contact, $request->validated());
+
+        return response()->json(['message' => 'تم تحديث جهة الاتصال بنجاح', 'data' => $updated]);
+    }
+
+    public function destroyContact(string $id, string $contactId)
+    {
+        $contact = SupplierContact::where('supplier_id', $id)->findOrFail($contactId);
+        $this->supplierService->deleteContact($contact);
+
+        return response()->json(['message' => 'تم حذف جهة الاتصال بنجاح']);
+    }
+
+    // ── Ledger (purchase history, payment history, balances) ─────────────────
+
+    public function ledger(string $id)
+    {
+        $supplier = Supplier::findOrFail($id);
+
+        return response()->json(['message' => 'ok', 'data' => $this->supplierService->ledger($supplier)]);
     }
 }

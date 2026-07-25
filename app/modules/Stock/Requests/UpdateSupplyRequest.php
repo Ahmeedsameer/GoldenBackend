@@ -16,6 +16,9 @@ class UpdateSupplyRequest extends FormRequest
         return [
             'supplier_id'    => 'sometimes|required|integer|exists:suppliers,id',
             'payment_method' => 'sometimes|required|in:debt,immediate',
+            'invoice_number' => ['sometimes', 'nullable', 'string', 'max:100', \Illuminate\Validation\Rule::unique('supplies', 'invoice_number')->ignore($this->route('id'))],
+            'discount'       => 'sometimes|nullable|numeric|min:0',
+            'tax'            => 'sometimes|nullable|numeric|min:0',
         ];
     }
 

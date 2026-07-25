@@ -52,7 +52,7 @@ class SupplyController extends Controller
 
     public function store(StoreSupplyRequest $request)
     {
-        $supply = $this->supplyService->create($request->validated());
+        $supply = $this->supplyService->create($request->validated(), $request->user());
 
         return response()->json([
             'message' => 'تم تسجيل التوريد وإضافة الأصناف إلى المستودع الرئيسي بنجاح',

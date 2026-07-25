@@ -10,6 +10,7 @@ use App\Models\SafeTransaction;
 use App\Models\SafeTransfer;
 use App\Models\SafeType;
 use App\Models\Shop;
+use App\Models\SupplierPayment;
 use Illuminate\Support\Facades\DB;
 
 class SafeService
@@ -201,6 +202,23 @@ class SafeService
         });
     }
 
+    // ── Supplier payment (Supplier Management) ────────────────────────────────
+    // The admin picks WHICH Safe pays a supplier (Main Safe, a branch's, or
+    // any other active safe) — same pattern as Salary Advance disbursement.
+    // Called from inside SupplierPaymentService::pay()'s own DB::transaction.
+
+    public function recordSupplierPayment(
+        Safe            $safe,
+        SupplierPayment $payment,
+        int             $currencyId,
+        float           $amount,
+        int             $userId,
+        ?string         $note = null
+    ): SafeTransaction {
+        $this->guardAgainstOverdraft($safe->id, $currencyId, $amount);
+        return $this->applyTransaction($safe, 'supplier_payment', $currencyId, $amount, $userId, null, $note, null, null, null, $payment->id);
+    }
+
     // ── Private: core write ───────────────────────────────────────────────────
 
     private function applyTransaction(
@@ -209,28 +227,30 @@ class SafeService
         int     $currencyId,
         float   $amount,
         int     $userId,
-        ?int    $reasonId        = null,
-        ?string $note            = null,
-        ?int    $invoiceId       = null,
-        ?int    $transferId      = null,
-        ?int    $salaryAdvanceId = null
+        ?int    $reasonId          = null,
+        ?string $note              = null,
+        ?int    $invoiceId         = null,
+        ?int    $transferId        = null,
+        ?int    $salaryAdvanceId   = null,
+        ?int    $supplierPaymentId = null
     ): SafeTransaction {
         $direction = SafeTransaction::DIRECTION_MAP[$type];
 
         $this->updateBalance($safe->id, $currencyId, $direction, $amount);
 
         return SafeTransaction::create([
-            'safe_id'            => $safe->id,
-            'type'               => $type,
-            'direction'          => $direction,
-            'currency_id'        => $currencyId,
-            'amount'             => $amount,
-            'reason_id'          => $reasonId,
-            'note'               => $note,
-            'invoice_id'         => $invoiceId,
-            'transfer_id'        => $transferId,
-            'salary_advance_id'  => $salaryAdvanceId,
-            'user_id'            => $userId,
+            'safe_id'              => $safe->id,
+            'type'                 => $type,
+            'direction'            => $direction,
+            'currency_id'          => $currencyId,
+            'amount'               => $amount,
+            'reason_id'            => $reasonId,
+            'note'                 => $note,
+            'invoice_id'           => $invoiceId,
+            'transfer_id'          => $transferId,
+            'salary_advance_id'    => $salaryAdvanceId,
+            'supplier_payment_id'  => $supplierPaymentId,
+            'user_id'              => $userId,
         ]);
     }
 

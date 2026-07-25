@@ -18,6 +18,14 @@ class StoreSupplyRequest extends FormRequest
         return [
             'supplier_id'          => 'required|integer|exists:suppliers,id',
             'payment_method'       => 'required|in:debt,immediate',
+            // Purchase-invoice fields — Supply IS the invoice (see Supply model).
+            'invoice_number'       => 'nullable|string|max:100|unique:supplies,invoice_number',
+            'discount'             => 'nullable|numeric|min:0',
+            'tax'                  => 'nullable|numeric|min:0',
+            // Only meaningful (and only read) when payment_method=immediate —
+            // which Safe actually pays the invoice in full right now.
+            'safe_id'              => 'nullable|integer|exists:safes,id',
+            'currency_id'          => 'nullable|integer|exists:currencies,id',
             'items'                => 'required|array|min:1',
             // Compound Products are virtual (composed at sale time) — they
             // have no inventory and can never be purchased/supplied.
