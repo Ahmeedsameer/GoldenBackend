@@ -2,8 +2,8 @@
 
 namespace App\Modules\Sales\Requests;
 
+use App\Models\PaymentMethod;
 use App\Models\Safe;
-use App\Modules\Sales\Enums\PaymentMethod;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -41,15 +41,19 @@ class StoreInvoiceRequest extends FormRequest
             'payments.*.currency_id' => ['required_with:payments', 'integer', 'exists:currencies,id'],
             'payments.*.amount'      => ['required_with:payments', 'numeric', 'min:0.01'],
 
-            // Payment method — one of the supported methods (cash, visa, …)
-            'payments.*.payment_method' => ['required_with:payments', Rule::in(PaymentMethod::values())],
+            // Payment method — any admin-managed PaymentMethod (unlimited: cash,
+            // visa, mastercard, Vodafone Cash, InstaPay, ...), never the old
+            // hardcoded 2-value enum. `payment_method` (legacy string) is no
+            // longer client-supplied — SalesService derives it from the resolved
+            // method's type, kept only for backward-compatible reads of old rows.
+            'payments.*.payment_method_id' => ['required_with:payments', 'integer', 'exists:payment_methods,id'],
 
-            // Transaction/reference number — required only for methods that need
-            // it (e.g. Visa). Rejected as a duplicate if the same reference was
-            // already used on any previous payment.
+            // Transaction/reference number — required only for card-type methods
+            // (checked dynamically in withValidator(), since the set of methods
+            // needing it is now admin-managed, not a fixed enum list). Rejected
+            // as a duplicate if the same reference was already used elsewhere.
             'payments.*.transaction_number' => [
                 'nullable',
-                'required_if:payments.*.payment_method,' . implode(',', PaymentMethod::requiresTransactionNumber()),
                 'string',
                 'max:100',
                 Rule::unique('invoice_payments', 'transaction_number'),
@@ -87,6 +91,24 @@ class StoreInvoiceRequest extends FormRequest
                     $validator->errors()->add("items.$index.price", 'سعر الوحدة يجب أن يكون أكبر من صفر لهذا الصنف.');
                 }
             }
+
+            // Card-type payment methods (visa/mastercard/bank_card) require a
+            // transaction/reference number — which methods count as "card" is
+            // now admin-managed (PaymentMethod::CARD_TYPES), not a fixed enum list.
+            $payments = (array) $this->input('payments', []);
+            $methodIds = array_filter(array_column($payments, 'payment_method_id'));
+            if ($methodIds) {
+                $cardMethodIds = PaymentMethod::whereIn('id', $methodIds)
+                    ->whereIn('type', PaymentMethod::CARD_TYPES)
+                    ->pluck('id')->all();
+
+                foreach ($payments as $index => $payment) {
+                    $methodId = $payment['payment_method_id'] ?? null;
+                    if ($methodId && in_array($methodId, $cardMethodIds, true) && empty($payment['transaction_number'])) {
+                        $validator->errors()->add("payments.$index.transaction_number", 'رقم العملية مطلوب لهذه الوسيلة الدفع.');
+                    }
+                }
+            }
         });
     }
 
@@ -107,9 +129,8 @@ class StoreInvoiceRequest extends FormRequest
             'payments.*.currency_id.exists'   => 'العملة المحددة غير موجودة في النظام',
             'payments.*.amount.required_with' => 'المبلغ مطلوب لكل صف دفع',
             'payments.*.amount.min'           => 'يجب أن يكون المبلغ أكبر من صفر',
-            'payments.*.payment_method.required_with' => 'طريقة الدفع مطلوبة لكل صف دفع',
-            'payments.*.payment_method.in'            => 'طريقة الدفع المحددة غير مدعومة',
-            'payments.*.transaction_number.required_if' => 'رقم عملية فيزا مطلوب عند اختيار الدفع بالفيزا',
+            'payments.*.payment_method_id.required_with' => 'وسيلة الدفع مطلوبة لكل صف دفع',
+            'payments.*.payment_method_id.exists'        => 'وسيلة الدفع المحددة غير موجودة',
             'payments.*.transaction_number.max'         => 'رقم العملية طويل جداً',
             'payments.*.transaction_number.unique'      => 'رقم العملية مُستخدم من قبل في فاتورة أخرى',
             'items.required'                  => 'يجب إضافة صنف واحد على الأقل في الفاتورة',

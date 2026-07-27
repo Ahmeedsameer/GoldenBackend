@@ -112,12 +112,21 @@ class TransferRequestService
      */
     public function create(array $data, User $user, bool $submitImmediately = false, bool $notify = true): TransferRequest
     {
-        // Part 5.8 — a branch manager can never impersonate another branch: they are
-        // always the requester acting for THEIR OWN shop (User.shop_id), never a shop
-        // they merely pick from a dropdown. This overrides whatever destination_shop_id
-        // was submitted — the frontend may display it, but the server is the source of truth.
+        // Part 5.8 — a branch manager can never impersonate another branch: one side of
+        // every transfer they create must be THEIR OWN shop (User.shop_id), never a shop
+        // they merely pick from a dropdown. A manager can be on EITHER side — requesting
+        // stock in (their shop as destination, e.g. from another branch or the Main
+        // Warehouse) or sending stock out (their shop as source, e.g. back to the
+        // Warehouse or to another branch) — the frontend lets them choose which. Only
+        // when neither submitted side is their own shop (an attempt to broker a transfer
+        // between two shops they have no connection to) do we fall back to forcing them
+        // in as the destination, matching the original protective default.
         if ($user->role === 'manager' && $user->shop_id) {
-            $data['destination_shop_id'] = $user->shop_id;
+            $submittedSource = (int) ($data['source_shop_id'] ?? 0);
+            $submittedDestination = (int) ($data['destination_shop_id'] ?? 0);
+            if ($submittedSource !== (int) $user->shop_id && $submittedDestination !== (int) $user->shop_id) {
+                $data['destination_shop_id'] = $user->shop_id;
+            }
         }
 
         if ((int) $data['source_shop_id'] === (int) $data['destination_shop_id']) {
@@ -279,14 +288,18 @@ class TransferRequestService
         });
     }
 
-    /** Part 4 — every approved transfer automatically gets an internal-only invoice. Never touches sales `invoices`. */
+    /**
+     * Part 4 — every approved transfer automatically gets an internal-only invoice. Never touches sales `invoices`.
+     *
+     * `reference_value` is deliberately 0 here — approve() runs before any
+     * FIFO batch is drawn (that only happens in ship()), so there is no real
+     * value to put yet, and this ERP is FIFO end-to-end: never an estimate,
+     * never an average/last-purchase price. ship() fills in the real number
+     * once it knows exactly which batches (and therefore exact costs) were
+     * actually deducted from the warehouse — see its own docblock.
+     */
     private function generateInternalInvoice(TransferRequest $transfer, User $user): InternalTransferInvoice
     {
-        $referenceValue = $transfer->items()
-            ->with('product:id,purchase_cost')
-            ->get()
-            ->sum(fn ($item) => (float) $item->requested_quantity * (float) ($item->product->purchase_cost ?? 0));
-
         $invoice = InternalTransferInvoice::create([
             'invoice_number' => 'ITI-000000',
             'transfer_request_id' => $transfer->id,
@@ -294,7 +307,7 @@ class TransferRequestService
             'destination_shop_id' => $transfer->destination_shop_id,
             'date' => now()->toDateString(),
             'user_id' => $user->id,
-            'reference_value' => round($referenceValue, 2),
+            'reference_value' => 0,
             'status' => 'active',
         ]);
 
@@ -334,18 +347,29 @@ class TransferRequestService
      * receive() can credit the destination with the same supply_item_id
      * lineage. Inventory does NOT move to the destination yet — Part 6's
      * explicit rule is "inventory only increases after receiving."
+     *
+     * This is also the only point the Internal Transfer Invoice's value can
+     * be known for real: which exact FIFO batches get drawn (and therefore
+     * their exact purchase cost) is only decided right here — approve() ran
+     * earlier and had no batches yet. Each batch's own `quantity_shipped ×
+     * SupplyItem.unit_price` is accumulated as it's drawn and written to the
+     * invoice once shipping completes — never an average or a last-purchase
+     * estimate, always the literal cost of the units that physically left.
      */
     public function ship(TransferRequest $transfer, User $user): TransferRequest
     {
         $this->assertTransition($transfer, TransferRequest::STATUS_SHIPPED);
 
         return DB::transaction(function () use ($transfer, $user) {
+            $shippedFifoValue = 0.0;
+
             foreach ($transfer->items as $item) {
                 $needed = (float) ($item->approved_quantity ?? $item->requested_quantity);
 
                 $batches = Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $item->product_id))
                     ->where('shop_id', $this->warehouse->goodsShopId($transfer->source_shop_id))
                     ->where('current_quantity', '>', 0)
+                    ->with('supplyItem:id,unit_price')
                     ->orderBy('date')->orderBy('id')
                     ->lockForUpdate()
                     ->get();
@@ -367,6 +391,11 @@ class TransferRequestService
                         'created_at' => now(),
                     ]);
 
+                    // The exact FIFO cost of THIS batch — never averaged across batches,
+                    // never the product's last/average price. Summed across every batch
+                    // drawn for every item, this is the invoice's entire reference_value.
+                    $shippedFifoValue += $take * (float) ($goods->supplyItem->unit_price ?? 0);
+
                     $remaining = round($remaining - $take, 3);
                 }
 
@@ -377,6 +406,7 @@ class TransferRequestService
 
             $previous = $transfer->status;
             $transfer->update(['status' => TransferRequest::STATUS_SHIPPED, 'shipped_at' => now()]);
+            $transfer->internalInvoice()->update(['reference_value' => round($shippedFifoValue, 2)]);
             $this->log($transfer, $user, 'shipped', $previous, TransferRequest::STATUS_SHIPPED);
             $this->notify($transfer, 'تم شحن طلب النقل', "تم شحن طلب النقل {$transfer->request_number} — بانتظار الاستلام في {$transfer->destinationShop->name}", 'shipped');
 
@@ -486,11 +516,17 @@ class TransferRequestService
      * credited to the destination (see receive()'s comment) — there is no
      * live stock anywhere left to decrement, so this never routes through
      * WasteService::register() (which requires decrementing a shop's
-     * current_quantity). The waste is attributed to the SOURCE shop, since
-     * that is whose books actually absorbed the loss. WasteRecordBatch rows
-     * are still written directly against the original shipped batches, so
-     * this waste has the exact same Waste → Supplier traceability as every
-     * other waste record — just without a second, redundant Goods movement.
+     * current_quantity). The waste is attributed to the DESTINATION shop —
+     * not because its books lost physical stock (they never had it), but
+     * because WasteController::index() scopes a manager's visibility to
+     * `shop_id === their own shop_id`, and the destination manager is the one
+     * who discovers the shortfall and files it here. Attributing it to the
+     * source (the warehouse, in the common case) would silently hide it from
+     * the only person who filed it — only admin could ever see it again.
+     * WasteRecordBatch rows are still written directly against the original
+     * shipped batches, so this waste has the exact same Waste → Supplier
+     * traceability as every other waste record — just without a second,
+     * redundant Goods movement.
      *
      * One entry per flagged item, covering that item's FULL missing+damaged
      * total in a single reason — kept deliberately simple; if a business
@@ -522,7 +558,7 @@ class TransferRequestService
 
                 $estimatedValue = $quantity * (float) ($item->product->purchase_cost ?? 0);
                 $waste = WasteRecord::create([
-                    'shop_id' => $transfer->source_shop_id,
+                    'shop_id' => $transfer->destination_shop_id,
                     'product_id' => $item->product_id,
                     'quantity' => $quantity,
                     'reason' => $entry['reason'],

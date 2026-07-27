@@ -28,6 +28,8 @@ class Supply extends Model
         'discount',
         'tax',
         'paid_amount',
+        'cancelled_at',
+        'cancelled_by',
     ];
 
     protected $casts = [
@@ -35,13 +37,19 @@ class Supply extends Model
         'discount' => 'decimal:2',
         'tax' => 'decimal:2',
         'paid_amount' => 'decimal:2',
+        'cancelled_at' => 'datetime',
     ];
 
-    protected $appends = ['items_subtotal', 'total_amount', 'remaining_amount', 'payment_status'];
+    protected $appends = ['items_subtotal', 'total_amount', 'remaining_amount', 'payment_status', 'is_cancelled'];
 
     public function supplier(): BelongsTo
     {
         return $this->belongsTo(Supplier::class);
+    }
+
+    public function cancelledBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'cancelled_by');
     }
 
     public function items(): HasMany
@@ -76,5 +84,10 @@ class Supply extends Model
             return 'credit';
         }
         return $this->remaining_amount <= 0 ? 'paid' : 'partial';
+    }
+
+    public function getIsCancelledAttribute(): bool
+    {
+        return $this->cancelled_at !== null;
     }
 }

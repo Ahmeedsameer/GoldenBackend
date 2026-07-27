@@ -41,9 +41,9 @@ class InvoiceController extends Controller
             'customer',
             'seller:id,name',
             'shop:id,name',
-            'items.product:id,name,sku,scalar',
+            'items.product:id,name,sku,scalar,purchase_cost',
             'items.parentProduct:id,name',
-            'items.goods',
+            'items.goods.supplyItem:id,unit_price',
             'payments.currency:id,code,symbol',
         ])->where('seller_id', auth()->id())->findOrFail($id);
 

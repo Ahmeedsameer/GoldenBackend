@@ -7,12 +7,18 @@ use App\Models\Product;
 use App\Models\Safe;
 use App\Models\Supply;
 use App\Models\SupplyItem;
+use App\Models\User;
+use App\Modules\Safe\Services\SafeService;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\DB;
 
 class SupplyService
 {
-    public function __construct(private InventoryAlertService $alerts, private SupplierPaymentService $payments) {}
+    public function __construct(
+        private InventoryAlertService $alerts,
+        private SupplierPaymentService $payments,
+        private SafeService $safeService,
+    ) {}
 
     public function getAll(array $filters = [], int $perPage = 15): LengthAwarePaginator
     {
@@ -233,6 +239,66 @@ class SupplyService
             }
 
             $supply->delete();
+        });
+    }
+
+    /**
+     * إلغاء فاتورة توريد — بدل الحذف النهائي: تُعلَّم كملغاة، تُصفَّر كمية
+     * البضاعة التي أضافتها في المستودع الرئيسي، وتُسترجع أي دفعة سُددت
+     * للمورد عليها إلى نفس الخزنة/العملة التي خرجت منها.
+     *
+     * يُمنع الإلغاء إذا نُقل جزء من البضاعة إلى الفروع (نفس فحص delete())
+     * أو إذا استُهلك جزء منها في المستودع نفسه (بيع/هالك) — أي إن أصبحت
+     * الكمية المتبقية أقل مما أضافه هذا التوريد، فلا يوجد شيء آمن نعكسه.
+     */
+    public function cancel(Supply $supply, User $user): Supply
+    {
+        return DB::transaction(function () use ($supply, $user) {
+            if ($supply->cancelled_at) {
+                abort(422, 'الفاتورة ملغاة بالفعل');
+            }
+
+            $supply->load(['items.product:id,name', 'items.goods', 'payments.safe.shop:id,name']);
+
+            foreach ($supply->items as $item) {
+                $hasTransferred = $item->goods->contains(fn (Goods $g) => $g->shop_id !== null);
+                if ($hasTransferred) {
+                    abort(422, "لا يمكن إلغاء الفاتورة — جزء من صنف \"{$item->product->name}\" نُقل بالفعل إلى الفروع");
+                }
+
+                $warehouseGoods = $item->goods->firstWhere('shop_id', null);
+                $onHand = $warehouseGoods ? (float) $warehouseGoods->current_quantity : 0.0;
+                if (round($onHand, 3) < round((float) $item->quantity, 3)) {
+                    abort(422, "لا يمكن إلغاء الفاتورة — جزء من صنف \"{$item->product->name}\" تم استهلاكه بالفعل (بيع/هالك) من المستودع");
+                }
+            }
+
+            foreach ($supply->items as $item) {
+                $warehouseGoods = $item->goods->firstWhere('shop_id', null);
+                $warehouseGoods?->update(['current_quantity' => 0]);
+            }
+
+            foreach ($supply->payments as $payment) {
+                // Reverse exactly what left the safe: amount + fee, both folded into
+                // the single 'supplier_payment' transaction at pay() time (see
+                // SupplierPaymentService::pay()) — never just the base amount.
+                $this->safeService->recordSupplierPaymentRefund(
+                    $payment->safe,
+                    $payment,
+                    $payment->currency_id,
+                    round((float) $payment->amount + (float) $payment->processing_fee_amount, 2),
+                    $user->id,
+                    "استرجاع دفعة بسبب إلغاء فاتورة التوريد {$supply->invoice_number}"
+                );
+            }
+
+            $supply->update([
+                'paid_amount'  => 0,
+                'cancelled_at' => now(),
+                'cancelled_by' => $user->id,
+            ]);
+
+            return $supply->fresh(['supplier:id,name,phone', 'items.product:id,name,scalar', 'cancelledBy:id,name']);
         });
     }
 }

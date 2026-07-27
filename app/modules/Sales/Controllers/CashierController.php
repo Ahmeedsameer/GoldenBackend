@@ -5,6 +5,7 @@ namespace App\Modules\Sales\Controllers;
 use App\Http\Controllers\Controller;
 use App\Models\Category;
 use App\Models\Currency;
+use App\Models\PaymentMethod;
 use App\Models\Safe;
 use App\Modules\Sales\Services\SalesService;
 
@@ -257,6 +258,58 @@ class CashierController extends Controller
         return response()->json([
             'message' => 'تم جلب العملات بنجاح',
             'data'    => $currencies,
+        ]);
+    }
+
+    /**
+     * Return all active payment methods (for the payment-method picker in the cashier UI).
+     * GET /api/sales/payment-methods
+     */
+    public function getPaymentMethods()
+    {
+        $seller = auth()->user();
+        if (! $seller->shop_id) {
+            return response()->json(['message' => 'البائع غير مرتبط بأي فرع'], 422);
+        }
+        $shopId = app(\App\Modules\Hr\Services\ActiveBranchService::class)->activeBranchId($seller) ?? (int) $seller->shop_id;
+
+        // Branch restriction (Payment Methods Phase 2): a method with no shops
+        // attached is unrestricted (available everywhere) — the existing default.
+        $methods = PaymentMethod::with('currency:id,code,symbol')
+            ->where('is_active', true)
+            ->where(fn ($q) => $q->doesntHave('shops')->orWhereHas('shops', fn ($sq) => $sq->where('shops.id', $shopId)))
+            ->orderBy('name')
+            ->get();
+
+        return response()->json([
+            'message' => 'تم جلب وسائل الدفع بنجاح',
+            'data'    => $methods,
+        ]);
+    }
+
+    /**
+     * Live cost/profit preview for the cart, BEFORE the sale is finalized.
+     * Reuses the exact same FIFO batch order SalesService::processItem() drains
+     * from at sale time (SalesService::fifoBatchesQuery()) — same cost figures,
+     * just computed read-only ahead of the actual sale.
+     * POST /api/sales/quote-cost  { items: [{product_id, quantity}] }
+     */
+    public function quoteCost()
+    {
+        $seller = auth()->user();
+        if (! $seller->shop_id) {
+            return response()->json(['message' => 'البائع غير مرتبط بأي فرع'], 422);
+        }
+        $shopId = app(\App\Modules\Hr\Services\ActiveBranchService::class)->activeBranchId($seller) ?? (int) $seller->shop_id;
+
+        $items = collect(request('items', []))
+            ->filter(fn ($i) => !empty($i['product_id']) && (float) ($i['quantity'] ?? 0) > 0)
+            ->map(fn ($i) => ['product_id' => (int) $i['product_id'], 'quantity' => (float) $i['quantity']])
+            ->values()->all();
+
+        return response()->json([
+            'message' => 'ok',
+            'data'    => $this->salesService->quoteCartCost($shopId, $items),
         ]);
     }
 

@@ -47,8 +47,9 @@ class AdminInvoiceController extends Controller
             'customer',
             'seller:id,name',
             'shop:id,name',
-            'items.product:id,name,sku,scalar,category_id',
+            'items.product:id,name,sku,scalar,category_id,purchase_cost',
             'items.product.category:id,name,minimum_sell_price',
+            'items.goods.supplyItem:id,unit_price',
             'payments.currency:id,code,symbol',
         ])->findOrFail($id);
 
@@ -69,6 +70,24 @@ class AdminInvoiceController extends Controller
         return response()->json([
             'message' => "تم {$label} الفاتورة بنجاح",
             'data'    => $updated,
+        ]);
+    }
+
+    /**
+     * POST /api/admin/invoices/{id}/cancel — reverses stock AND money (see
+     * SalesService::cancel), unlike updateStatus('cancelled') above which is
+     * only the pending-review reject path. Not shop-scoped: admin manages
+     * every shop's invoices.
+     */
+    public function cancel(\Illuminate\Http\Request $request, string $id)
+    {
+        $data = $request->validate(['reason' => 'nullable|string']);
+        $invoice = Invoice::findOrFail($id);
+        $cancelled = $this->salesService->cancel($invoice, $request->user(), $data['reason'] ?? null);
+
+        return response()->json([
+            'message' => 'تم إلغاء الفاتورة بنجاح، وتمت إعادة المخزون واسترجاع المبلغ',
+            'data'    => $cancelled,
         ]);
     }
 }

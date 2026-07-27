@@ -8,11 +8,12 @@ use App\Models\Goods;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
 use App\Models\InvoicePayment;
+use App\Models\PaymentMethod;
 use App\Models\Product;
 use App\Models\Safe;
+use App\Models\SafeTransaction;
 use App\Models\Shop;
 use App\Models\User;
-use App\Modules\Sales\Enums\PaymentMethod;
 use App\Modules\Safe\Services\SafeService;
 use App\Modules\Hr\Services\ActiveBranchService;
 use App\Modules\Stock\Services\InventoryAlertService;
@@ -382,21 +383,59 @@ class SalesService
             }
 
             // ── 9. Record payments ────────────────────────────────────────────
+            // Card Fees (Payment Methods module): the invoice's own total/amount
+            // NEVER changes — only what the company actually nets after the
+            // processing fee. Customer Paid 1000 via a 2%-fee method → fee 20,
+            // net 980. Each line credits the GROSS amount as an ordinary 'sale'
+            // (type unchanged, amount unchanged from pre-fee behavior), then the
+            // fee is immediately debited as its own 'bank_charge' transaction —
+            // net balance impact identical to crediting net directly, but now the
+            // fee is a real, separately reportable ledger row instead of being
+            // silently folded into a smaller number (see SafeService::recordBankCharge).
+            //
+            // Per-line safe (Payment Methods Phase 2): each payment line routes to
+            // its OWN assigned safe (PaymentMethod.safe_id) when the admin set one
+            // — e.g. every branch's "Visa CIB" sales all land in the same CIB Bank
+            // Safe, company-wide — falling back to the invoice-level `$safe`
+            // resolved in step 8 (today's shop-default-safe behavior) when the
+            // method has no assignment. No manual safe picking either way.
             if ($safe->safeType->kind === 'physical' && ! empty($data['payments'])) {
                 foreach ($data['payments'] as $payment) {
-                    InvoicePayment::create([
-                        'invoice_id'         => $invoice->id,
-                        'safe_id'            => $safe->id,
-                        'currency_id'        => (int) $payment['currency_id'],
-                        'amount'             => (float) $payment['amount'],
-                        'payment_method'     => $payment['payment_method'] ?? PaymentMethod::Cash->value,
+                    $method = PaymentMethod::findOrFail((int) $payment['payment_method_id']);
+                    $lineSafe = $method->safe_id
+                        ? Safe::with('safeType')->lockForUpdate()->findOrFail($method->safe_id)
+                        : $safe;
+
+                    $grossAmount = (float) $payment['amount'];
+                    $feePercent = $method->isCardType() ? (float) $method->processing_fee_percent : 0.0;
+                    $feeAmount = round($grossAmount * $feePercent / 100, 2);
+                    $netAmount = round($grossAmount - $feeAmount, 2);
+
+                    $invoicePayment = InvoicePayment::create([
+                        'invoice_id'              => $invoice->id,
+                        'safe_id'                 => $lineSafe->id,
+                        'currency_id'             => (int) $payment['currency_id'],
+                        'amount'                  => $grossAmount,
+                        'payment_method'          => $method->type,
+                        'payment_method_id'       => $method->id,
+                        'processing_fee_percent'  => $feePercent,
+                        'processing_fee_amount'   => $feeAmount,
+                        'net_amount'              => $netAmount,
                         'transaction_number' => ! empty($payment['transaction_number'])
                             ? $payment['transaction_number']
                             : null,
                     ]);
+
                     $this->safeService->recordSaleTransaction(
-                        $safe, $invoice, (int) $payment['currency_id'], (float) $payment['amount'], $seller->id
+                        $lineSafe, $invoice, (int) $payment['currency_id'], $grossAmount, $seller->id, $invoicePayment->id
                     );
+
+                    if ($feeAmount > 0) {
+                        $this->safeService->recordBankCharge(
+                            $lineSafe, $invoice, (int) $payment['currency_id'], $feeAmount, $seller->id, $invoicePayment->id,
+                            "رسوم معالجة دفعة عبر {$method->name} — فاتورة رقم {$invoice->id}"
+                        );
+                    }
                 }
             } else {
                 // Virtual safe → record the invoice total directly in EGP
@@ -455,13 +494,7 @@ class SalesService
 
         // Fetch all batches with stock for this product in the seller's shop,
         // ordered oldest-first (FIFO) and locked for the transaction.
-        $batches = Goods::whereHas('supplyItem', fn($q) => $q->where('product_id', $productId))
-            ->where('shop_id', $invoice->shop_id)
-            ->where('current_quantity', '>', 0)
-            ->orderBy('date')
-            ->orderBy('id')
-            ->lockForUpdate()
-            ->get();
+        $batches = $this->fifoBatchesQuery($productId, $invoice->shop_id)->lockForUpdate()->get();
 
         $remaining = $needed;
 
@@ -518,6 +551,86 @@ class SalesService
             // If no batch exists at all, the invoice item is simply skipped —
             // this product was never received into this shop.
         }
+    }
+
+    /**
+     * FIFO batch order for a product/shop — oldest-first, stock-only. The single
+     * source of truth for "which batch gets drained first"; processItem() (real
+     * deduction) and quoteCartCost() (read-only pre-sale preview) both build on
+     * this exact query so the two never compute cost differently.
+     */
+    private function fifoBatchesQuery(int $productId, int $shopId)
+    {
+        return Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $productId))
+            ->where('shop_id', $shopId)
+            ->where('current_quantity', '>', 0)
+            ->orderBy('date')
+            ->orderBy('id');
+    }
+
+    /**
+     * Read-only pre-sale cost/profit preview for the cashier's cart. Walks the
+     * exact same FIFO batch order processItem() drains from (fifoBatchesQuery()),
+     * but never locks or mutates anything — pure quote. Unit-cost resolution
+     * mirrors InvoiceItem::getUnitCostAttribute() (real batch cost, falling back
+     * to the product's average purchase cost) so the number shown here is
+     * identical to what the invoice will show once the sale is completed.
+     *
+     * @param  array<int, array{product_id:int, quantity:float}>  $items
+     */
+    public function quoteCartCost(int $shopId, array $items): array
+    {
+        $lines = [];
+        $totalCost = 0.0;
+
+        foreach ($items as $item) {
+            $productId = (int) $item['product_id'];
+            $remaining = (float) $item['quantity'];
+            $lineCost  = 0.0;
+
+            $batches = $this->fifoBatchesQuery($productId, $shopId)->get();
+            $lastBatch = null;
+
+            foreach ($batches as $goods) {
+                if ($remaining <= 0) {
+                    break;
+                }
+                $take = min((float) $goods->current_quantity, $remaining);
+                $unitCost = (float) ($goods->supplyItem?->unit_price ?? 0);
+                $lineCost += $take * $unitCost;
+                $remaining = round($remaining - $take, 3);
+                $lastBatch = $goods;
+            }
+
+            // Oversell: mirror processItem()'s fallback — remainder priced at the
+            // most-recent batch's cost, or the product's average cost if there's no stock at all.
+            if ($remaining > 0) {
+                $fallback = $lastBatch
+                    ?? Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $productId))
+                        ->where('shop_id', $shopId)
+                        ->orderByDesc('date')->orderByDesc('id')->first();
+
+                $fallbackUnitCost = (float) ($fallback?->supplyItem?->unit_price
+                    ?? Product::find($productId)?->purchase_cost
+                    ?? 0);
+
+                $lineCost += $remaining * $fallbackUnitCost;
+            }
+
+            $lineCost = round($lineCost, 2);
+            $totalCost += $lineCost;
+
+            $lines[] = [
+                'product_id' => $productId,
+                'quantity'   => (float) $item['quantity'],
+                'cost'       => $lineCost,
+            ];
+        }
+
+        return [
+            'total_cost' => round($totalCost, 2),
+            'lines'      => $lines,
+        ];
     }
 
     // ── Coexistence pricing: per-item engine, with legacy fallback ─────────────
@@ -1020,9 +1133,10 @@ class SalesService
             'customer',
             'seller:id,name',
             'shop:id,name',
-            'items.product:id,name,sku,scalar,category_id',
+            'items.product:id,name,sku,scalar,category_id,purchase_cost',
             'items.product.category:id,name,minimum_sell_price',
             'items.parentProduct:id,name',
+            'items.goods.supplyItem:id,unit_price',
             'payments.currency:id,code,symbol',
         ]);
 
@@ -1039,7 +1153,10 @@ class SalesService
             $query->whereDate('date', '<=', $filters['date_to']);
         }
 
-        return $query->latest()->paginate($perPage);
+        // Cost/profit/fee summary reused from Invoice's accessors (same figures as the
+        // invoice detail page) — appended here only, so other Invoice endpoints stay untouched.
+        return $query->latest()->paginate($perPage)
+            ->through(fn (Invoice $inv) => $inv->append(['total_cost', 'gross_profit', 'bank_fee', 'net_profit']));
     }
 
     // ── Update invoice status ─────────────────────────────────────────────────
@@ -1057,5 +1174,77 @@ class SalesService
         $invoice->update(['status' => $status]);
 
         return $invoice->fresh(['customer', 'items.product:id,name,sku', 'items.parentProduct:id,name']);
+    }
+
+    // ── Cancel a sale (admin/manager) — reverses stock AND money ──────────────
+    // Unlike updateStatus('cancelled') above (the pending-review reject path,
+    // which never touched Goods/Safe), this is a genuine undo: every sold
+    // unit returns to the branch's shelf, and every EGP the sale brought in
+    // leaves the exact safe/currency it landed in. Allowed from any status
+    // except already-cancelled — including 'approved', which updateStatus()
+    // deliberately refuses to touch.
+
+    public function cancel(Invoice $invoice, User $user, ?string $reason = null): Invoice
+    {
+        return DB::transaction(function () use ($invoice, $user, $reason) {
+            if ($invoice->status === 'cancelled') {
+                abort(422, 'الفاتورة ملغاة بالفعل');
+            }
+
+            $invoice->load(['items', 'payments.safe']);
+
+            // 1. Return every sold unit to stock — InvoiceItem.goods_id is always
+            //    resolved at sale time (see processItem()), so this is exact.
+            foreach ($invoice->items->groupBy('goods_id') as $goodsId => $items) {
+                Goods::where('id', $goodsId)->increment('current_quantity', $items->sum('quantity'));
+            }
+
+            // 2. Reverse the money — each payment LINE independently, from its own
+            //    safe (InvoicePayment.safe_id, per-line since Payment Methods Phase 2),
+            //    or the single 'sale' SafeTransaction when a virtual safe was used
+            //    (no InvoicePayment rows in that case).
+            // Reverse the GROSS `amount` via 'refund' (that safe was credited the
+            // gross — see createInvoice()), then separately reverse the fee via
+            // 'bank_charge_reversal' if this line had one. Two symmetric reversals
+            // mirroring the two forward transactions — net effect per line is
+            // exactly (gross − fee), same invariant as before, just decomposed.
+            $note = 'استرجاع بسبب إلغاء الفاتورة رقم ' . $invoice->id . ($reason ? " — {$reason}" : '');
+
+            if ($invoice->payments->isNotEmpty()) {
+                foreach ($invoice->payments as $payment) {
+                    // Reverse the fee FIRST — the safe currently only holds the net
+                    // (gross was credited, then the fee was immediately debited at
+                    // sale time). Refunding the full gross before crediting the fee
+                    // back would momentarily overdraw the safe by exactly the fee
+                    // amount and trip the overdraft guard, even though the two
+                    // reversals net out to a perfectly valid final balance.
+                    if ((float) $payment->processing_fee_amount > 0) {
+                        $this->safeService->recordBankChargeReversal(
+                            $payment->safe, $invoice, $payment->currency_id, (float) $payment->processing_fee_amount, $user->id, $payment->id, $note
+                        );
+                    }
+                    $this->safeService->recordSaleRefund(
+                        $payment->safe, $invoice, $payment->currency_id, (float) $payment->amount, $user->id, $note, $payment->id
+                    );
+                }
+            } else {
+                $saleTransactions = SafeTransaction::where('invoice_id', $invoice->id)->where('type', 'sale')->get();
+                foreach ($saleTransactions as $tx) {
+                    $this->safeService->recordSaleRefund($tx->safe, $invoice, $tx->currency_id, (float) $tx->amount, $user->id, $note);
+                }
+            }
+
+            $invoice->update([
+                'status'               => 'cancelled',
+                'cancelled_at'         => now(),
+                'cancelled_by'         => $user->id,
+                'cancellation_reason'  => $reason,
+            ]);
+
+            return $invoice->fresh([
+                'customer', 'seller:id,name', 'shop:id,name', 'cancelledBy:id,name',
+                'items.product:id,name,sku', 'items.parentProduct:id,name', 'payments.currency:id,code',
+            ]);
+        });
     }
 }

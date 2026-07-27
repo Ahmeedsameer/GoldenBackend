@@ -19,9 +19,12 @@ class SafeTransaction extends Model
         'manager_expense'      => 'out',
         'transfer_in'          => 'in',
         'transfer_out'         => 'out',
-        'advance_disbursement' => 'out',
-        'advance_repayment'    => 'in',
-        'supplier_payment'     => 'out',
+        'advance_disbursement'     => 'out',
+        'advance_repayment'        => 'in',
+        'supplier_payment'         => 'out',
+        'supplier_payment_refund'  => 'in',
+        'bank_charge'              => 'out',
+        'bank_charge_reversal'     => 'in',
     ];
 
     protected $fillable = [
@@ -36,6 +39,7 @@ class SafeTransaction extends Model
         'transfer_id',
         'salary_advance_id',
         'supplier_payment_id',
+        'invoice_payment_id',
         'user_id',
     ];
 
@@ -74,6 +78,12 @@ class SafeTransaction extends Model
     public function supplierPayment(): BelongsTo
     {
         return $this->belongsTo(SupplierPayment::class);
+    }
+
+    /** The exact payment LINE that generated this transaction — disambiguates which of an invoice's several payment lines this row belongs to (Safe History traceability). */
+    public function invoicePayment(): BelongsTo
+    {
+        return $this->belongsTo(InvoicePayment::class);
     }
 
     public function user(): BelongsTo

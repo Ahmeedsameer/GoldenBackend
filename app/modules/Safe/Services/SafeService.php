@@ -79,7 +79,7 @@ class SafeService
     public function getTransactions(Safe $safe, array $filters, int $perPage): mixed
     {
         $query = $safe->transactions()
-            ->with('user:id,name,role', 'currency', 'reason', 'invoice:id,status,date')
+            ->with('user:id,name,role', 'currency', 'reason', 'invoice:id,status,date', 'invoicePayment.paymentMethod:id,name,type')
             ->latest();
 
         if (! empty($filters['type']))       $query->where('type', $filters['type']);
@@ -163,9 +163,64 @@ class SafeService
         Invoice $invoice,
         int     $currencyId,
         float   $amount,
-        int     $userId
+        int     $userId,
+        ?int    $invoicePaymentId = null
     ): SafeTransaction {
-        return $this->applyTransaction($safe, 'sale', $currencyId, $amount, $userId, null, null, $invoice->id);
+        return $this->applyTransaction($safe, 'sale', $currencyId, $amount, $userId, null, null, $invoice->id, null, null, null, $invoicePaymentId);
+    }
+
+    /**
+     * Reverses a sale when its invoice is cancelled — money leaves the same
+     * safe/currency it originally arrived in (direction 'out', the existing
+     * 'refund' type — already the exact bucket AdminFinancialReportController
+     * expects for this). Guarded against overdraft like every other outflow:
+     * if that safe's balance was already spent down since the sale, the
+     * cancellation surfaces that instead of silently going negative.
+     */
+    public function recordSaleRefund(
+        Safe    $safe,
+        Invoice $invoice,
+        int     $currencyId,
+        float   $amount,
+        int     $userId,
+        ?string $note = null,
+        ?int    $invoicePaymentId = null
+    ): SafeTransaction {
+        $this->guardAgainstOverdraft($safe->id, $currencyId, $amount);
+        return $this->applyTransaction($safe, 'refund', $currencyId, $amount, $userId, null, $note, $invoice->id, null, null, null, $invoicePaymentId);
+    }
+
+    // ── Card/bank processing fee (Payment Methods Phase 2) ────────────────────
+    // The fee must participate in accounting as a real, visible expense — not
+    // just a smaller credit. Called right after recordSaleTransaction() credits
+    // the FULL gross amount to the same safe; debiting the fee immediately
+    // after nets the safe to exactly the same balance a direct net-credit
+    // would have produced, but now as two transparent ledger rows instead of one.
+
+    public function recordBankCharge(
+        Safe    $safe,
+        Invoice $invoice,
+        int     $currencyId,
+        float   $amount,
+        int     $userId,
+        ?int    $invoicePaymentId = null,
+        ?string $note = null
+    ): SafeTransaction {
+        $this->guardAgainstOverdraft($safe->id, $currencyId, $amount);
+        return $this->applyTransaction($safe, 'bank_charge', $currencyId, $amount, $userId, null, $note, $invoice->id, null, null, null, $invoicePaymentId);
+    }
+
+    /** Reverses a bank_charge on cancellation — mirrors recordSaleRefund exactly, same safe/currency, direction 'in'. */
+    public function recordBankChargeReversal(
+        Safe    $safe,
+        Invoice $invoice,
+        int     $currencyId,
+        float   $amount,
+        int     $userId,
+        ?int    $invoicePaymentId = null,
+        ?string $note = null
+    ): SafeTransaction {
+        return $this->applyTransaction($safe, 'bank_charge_reversal', $currencyId, $amount, $userId, null, $note, $invoice->id, null, null, null, $invoicePaymentId);
     }
 
     // ── Salary Advance disbursement / repayment (Phase 6.1/6.2) ───────────────
@@ -219,6 +274,24 @@ class SafeService
         return $this->applyTransaction($safe, 'supplier_payment', $currencyId, $amount, $userId, null, $note, null, null, null, $payment->id);
     }
 
+    /**
+     * Reverses a supplier payment when its purchase invoice is cancelled —
+     * money flows back INTO the same safe/currency it was originally paid
+     * from (direction 'in', unlike 'supplier_payment' which is 'out'), so no
+     * overdraft guard applies here. Links back to the same SupplierPayment
+     * row via `supplier_payment_id` — no new FK column needed.
+     */
+    public function recordSupplierPaymentRefund(
+        Safe            $safe,
+        SupplierPayment $payment,
+        int             $currencyId,
+        float           $amount,
+        int             $userId,
+        ?string         $note = null
+    ): SafeTransaction {
+        return $this->applyTransaction($safe, 'supplier_payment_refund', $currencyId, $amount, $userId, null, $note, null, null, null, $payment->id);
+    }
+
     // ── Private: core write ───────────────────────────────────────────────────
 
     private function applyTransaction(
@@ -232,7 +305,8 @@ class SafeService
         ?int    $invoiceId         = null,
         ?int    $transferId        = null,
         ?int    $salaryAdvanceId   = null,
-        ?int    $supplierPaymentId = null
+        ?int    $supplierPaymentId = null,
+        ?int    $invoicePaymentId  = null
     ): SafeTransaction {
         $direction = SafeTransaction::DIRECTION_MAP[$type];
 
@@ -250,6 +324,7 @@ class SafeService
             'transfer_id'          => $transferId,
             'salary_advance_id'    => $salaryAdvanceId,
             'supplier_payment_id'  => $supplierPaymentId,
+            'invoice_payment_id'   => $invoicePaymentId,
             'user_id'              => $userId,
         ]);
     }

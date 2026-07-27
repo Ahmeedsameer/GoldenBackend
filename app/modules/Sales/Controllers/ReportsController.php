@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Goods;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
+use App\Models\PaymentMethod;
 use App\Models\Safe;
 use App\Models\SafeTransaction;
 use Illuminate\Http\Request;
@@ -78,8 +79,11 @@ class ReportsController extends Controller
     }
 
     // ────────────────────────────────────────────────────────────────
-    // Cash vs Visa (…) totals for approved invoices in the shop/period.
-    // Returns one row per method: { method, label, amount_egp, payment_count }.
+    // Per-payment-method totals for approved invoices in the shop/period.
+    // Returns one row per ACTIVE admin-managed payment method (0 when
+    // none used), so the UI renders a stable set of cards — same
+    // convention as before, now driven by the payment_methods table
+    // instead of the old hardcoded 2-value enum.
     // ────────────────────────────────────────────────────────────────
     private function paymentMethodBreakdown(int $shopId, string $from, string $to): array
     {
@@ -89,26 +93,45 @@ class ReportsController extends Controller
             ->where('invoices.shop_id', $shopId)
             ->where('invoices.status',  'approved')
             ->whereBetween('invoices.date', [$from, $to])
+            ->whereNotNull('invoice_payments.payment_method_id')
             ->selectRaw('
-                invoice_payments.payment_method                                        as method,
+                invoice_payments.payment_method_id                                     as method_id,
                 COUNT(*)                                                                as payment_count,
                 COALESCE(SUM(invoice_payments.amount * currencies.rate), 0)             as amount_egp
             ')
-            ->groupBy('invoice_payments.payment_method')
+            ->groupBy('invoice_payments.payment_method_id')
             ->get()
-            ->keyBy('method');
+            ->keyBy('method_id');
 
-        // Always return every supported method (0 when none), so the UI can
-        // render a stable set of cards.
-        return array_map(function (string $method) use ($rows) {
-            $row = $rows->get($method);
-            return [
-                'method'        => $method,
-                'label'         => \App\Modules\Sales\Enums\PaymentMethod::from($method)->label(),
-                'amount_egp'    => round((float) ($row->amount_egp    ?? 0), 2),
-                'payment_count' => (int)   ($row->payment_count ?? 0),
-            ];
-        }, \App\Modules\Sales\Enums\PaymentMethod::values());
+        return PaymentMethod::where('is_active', true)->orderBy('name')->get()
+            ->map(function (PaymentMethod $method) use ($rows) {
+                $row = $rows->get($method->id);
+                return [
+                    'method'        => $method->id,
+                    'label'         => $method->name,
+                    'amount_egp'    => round((float) ($row->amount_egp    ?? 0), 2),
+                    'payment_count' => (int)   ($row->payment_count ?? 0),
+                ];
+            })->all();
+    }
+
+    /**
+     * GET /api/manager/reports/payment-methods-breakdown?date=YYYY-MM-DD
+     * Per-payment-method totals for the manager's own shop on a single day —
+     * powers the Safe Reconciliation page's breakdown table (no real
+     * "shift/session" concept exists in this codebase; this is deliberately
+     * a same-day snapshot, not a period-boundary/close action). Reuses
+     * paymentMethodBreakdown() exactly — no new aggregation logic.
+     */
+    public function paymentMethodsForDate(Request $request)
+    {
+        $shopId = Auth::user()->shop_id;
+        $date = $request->get('date', now()->toDateString());
+
+        return response()->json([
+            'message' => 'ok',
+            'data' => ['date' => $date, 'methods' => $this->paymentMethodBreakdown($shopId, $date, $date)],
+        ]);
     }
 
     // ────────────────────────────────────────────────────────────────

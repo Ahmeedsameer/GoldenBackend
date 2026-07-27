@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Admin\AdminSalesReportController;
+use App\Http\Controllers\Admin\AdminPaymentMethodReportController;
 use App\Http\Controllers\Admin\AdminFinancialReportController;
 use App\Http\Controllers\Admin\AdminPerfumeReportController;
 use App\Http\Controllers\Admin\AdminBranchComparisonController;
@@ -21,6 +22,7 @@ use App\Modules\Safe\Controllers\CurrencyController;
 use App\Modules\Safe\Controllers\SafeController;
 use App\Modules\Safe\Controllers\SafeManagementController;
 use App\Modules\Safe\Controllers\SafeTypeController;
+use App\Modules\Safe\Controllers\PaymentMethodController;
 use App\Modules\Safe\Controllers\TransactionReasonController;
 use App\Modules\Convention\Controllers\ConventionController;
 use App\Modules\Convention\Controllers\ConventionTransactionController;
@@ -106,7 +108,11 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::get('',            [\App\Modules\Sales\Controllers\AdminInvoiceController::class, 'index']);
         Route::get('{id}',        [\App\Modules\Sales\Controllers\AdminInvoiceController::class, 'show']);
         Route::put('{id}/status', [\App\Modules\Sales\Controllers\AdminInvoiceController::class, 'updateStatus']);
+        Route::post('{id}/cancel', [\App\Modules\Sales\Controllers\AdminInvoiceController::class, 'cancel']);
     });
+
+    // ── Unified cross-module invoice timeline (sales + purchase + internal transfer) ──
+    Route::get('admin/all-invoices', [\App\Http\Controllers\Admin\AdminAllInvoicesController::class, 'index']);
 
     // ── Categories ───────────────────────────────────────────────────────────
     Route::group(['prefix' => 'categories'], function () {
@@ -203,11 +209,10 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::get('suppliers/reports/purchases',   [SupplierReportController::class, 'purchases']);
         Route::get('suppliers/reports/payments',    [SupplierReportController::class, 'payments']);
 
-        // Supplies
+        // Supplies (create/update/destroy stay admin-only; index/show/cancel are
+        // shared with managers — see the 'admin,manager' stock group below)
         Route::get('supplier-intelligence',     [SupplyController::class, 'supplierIntelligence']);
-        Route::get('supplies',                  [SupplyController::class, 'index']);
         Route::post('supplies/create',          [SupplyController::class, 'store']);
-        Route::get('supplies/show/{id}',        [SupplyController::class, 'show']);
         Route::put('supplies/update/{id}',      [SupplyController::class, 'update']);
         Route::delete('supplies/destroy/{id}',  [SupplyController::class, 'destroy']);
 
@@ -242,6 +247,23 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::get('',               [SafeManagementController::class, 'index']);
         Route::post('',              [SafeManagementController::class, 'store']);
         Route::put('{id}/toggle',    [SafeManagementController::class, 'toggle']);
+    });
+
+    // ── Payment Methods (admin: unlimited, replaces the old hardcoded cash/visa enum) ──
+    Route::group(['prefix' => 'payment-methods'], function () {
+        Route::get('',            [PaymentMethodController::class, 'index']);
+        Route::post('',           [PaymentMethodController::class, 'store']);
+        Route::put('{id}',        [PaymentMethodController::class, 'update']);
+        Route::put('{id}/toggle', [PaymentMethodController::class, 'toggle']);
+    });
+
+    // ── Payment Methods reports (Payment Method / Card Fees / Bank Charges / Branch / Currency) ────
+    Route::group(['prefix' => 'admin/reports/payment-methods'], function () {
+        Route::get('',                 [AdminPaymentMethodReportController::class, 'paymentMethods']);
+        Route::get('card-fees',        [AdminPaymentMethodReportController::class, 'cardFees']);
+        Route::get('bank-charges',     [AdminPaymentMethodReportController::class, 'bankCharges']);
+        Route::get('branch-payments',  [AdminPaymentMethodReportController::class, 'branchPayments']);
+        Route::get('currency',         [AdminPaymentMethodReportController::class, 'currencyReport']);
     });
 
     // ── Admin Home Dashboard ──────────────────────────────────────────────────────
@@ -409,6 +431,7 @@ Route::group(['middleware' => ['api', CheckRole::class . ':manager'], 'prefix' =
     // ── Read-only lookups ─────────────────────────────────────────────────────
     Route::get('currencies',          [CurrencyController::class, 'index']);
     Route::get('transaction-reasons', [TransactionReasonController::class, 'index']);
+    Route::get('payment-methods',     [PaymentMethodController::class, 'index']);
 
     // ── Override requests ─────────────────────────────────────────────────────
     Route::get('override-requests',      [ManagerOverrideController::class, 'index']);
@@ -421,6 +444,12 @@ Route::group(['middleware' => ['api', CheckRole::class . ':manager'], 'prefix' =
     // branch-operations/stock-requests). The old instant "manager inventory
     // transfer" endpoint is removed on purpose, not merely hidden.
     Route::get('inventory', [ManagerInventoryController::class, 'index']);
+    Route::get('inventory/{productId}/history', [ManagerInventoryController::class, 'productHistory']);
+
+    // ── Sales invoices (own branch, every seller — not just the manager's own sales) ──
+    Route::get('invoices',              [\App\Modules\Sales\Controllers\ManagerInvoiceController::class, 'index']);
+    Route::get('invoices/{id}',         [\App\Modules\Sales\Controllers\ManagerInvoiceController::class, 'show']);
+    Route::post('invoices/{id}/cancel', [\App\Modules\Sales\Controllers\ManagerInvoiceController::class, 'cancel']);
 
     // ── Analytics & reports ───────────────────────────────────────────────────
     Route::get('reports/sales',                [ReportsController::class, 'salesSummary']);
@@ -431,6 +460,7 @@ Route::group(['middleware' => ['api', CheckRole::class . ':manager'], 'prefix' =
     Route::get('reports/inventory/movements',  [ReportsController::class, 'inventoryMovements']);
     Route::get('reports/customers',            [ReportsController::class, 'topCustomers']);
     Route::get('reports/financial',            [ReportsController::class, 'financialSummary']);
+    Route::get('reports/payment-methods-breakdown', [ReportsController::class, 'paymentMethodsForDate']);
 
 });
 
@@ -483,6 +513,13 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'pre
 Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'prefix' => 'admin/stock-intelligence'], function () {
     Route::get('overview',  [AdminStockIntelligenceController::class, 'overview']);
     Route::get('low-stock', [AdminStockIntelligenceController::class, 'lowStock']);
+});
+
+// ── Purchase invoices — view + cancel are admin+manager; create/update/destroy stay admin-only (see 'stock' group above) ──
+Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'prefix' => 'stock'], function () {
+    Route::get('supplies',              [SupplyController::class, 'index']);
+    Route::get('supplies/show/{id}',    [SupplyController::class, 'show']);
+    Route::post('supplies/{id}/cancel', [SupplyController::class, 'cancel']);
 });
 
 // ── Transfer Requests — read: all roles (shop-scoped); every write action is admin+manager, with per-shop ownership enforced inside the controller ──
@@ -628,6 +665,8 @@ Route::group(['middleware' => ['api', CheckRole::class . ':sales,manager']], fun
         Route::get('categories',  [CashierController::class, 'getCategories']);
         Route::get('customers',   [CashierController::class, 'searchCustomers']);
         Route::get('currencies',  [CashierController::class, 'getCurrencies']);
+        Route::get('payment-methods', [CashierController::class, 'getPaymentMethods']);
+        Route::post('quote-cost', [CashierController::class, 'quoteCost']);
         Route::get('safes',       [CashierController::class, 'getShopSafes']);
 
         // ── Invoice management ────────────────────────────────────────────────

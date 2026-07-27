@@ -13,11 +13,17 @@ class AdminFinancialReportController extends Controller
 {
     public function __construct(private ReportExportService $exportService) {}
 
-    // Real economic flows — internal transfers are excluded from all P&L calcs
+    // Real economic flows — internal transfers are excluded from all P&L calcs.
+    // Payment Methods Phase 2: 'bank_charge'/'bank_charge_reversal' added so the
+    // card processing fee actually shows up as a real expense here, per spec
+    // ("must participate in accounting, not just be stored"). Other pre-existing
+    // gaps (advance_disbursement, supplier_payment, ... never added here) are
+    // left untouched — out of scope for this change.
     private const REAL_TYPES = [
         'sale', 'refund',
         'admin_deposit', 'admin_withdrawal',
         'manager_deposit', 'manager_expense',
+        'bank_charge', 'bank_charge_reversal',
     ];
 
     /** GET /api/admin/reports/financial/export?format=pdf|excel — the safe-transaction ledger for the period. */
@@ -94,7 +100,9 @@ class AdminFinancialReportController extends Controller
             COALESCE(SUM(CASE WHEN type = 'refund'                            THEN amount ELSE 0 END), 0) as refunds,
             COALESCE(SUM(CASE WHEN type IN ('admin_deposit','manager_deposit') THEN amount ELSE 0 END), 0) as deposits,
             COALESCE(SUM(CASE WHEN type = 'admin_withdrawal'                  THEN amount ELSE 0 END), 0) as withdrawals,
-            COALESCE(SUM(CASE WHEN type = 'manager_expense'                   THEN amount ELSE 0 END), 0) as expenses
+            COALESCE(SUM(CASE WHEN type = 'manager_expense'                   THEN amount ELSE 0 END), 0) as expenses,
+            COALESCE(SUM(CASE WHEN type = 'bank_charge'                      THEN amount ELSE 0 END), 0) as bank_charges,
+            COALESCE(SUM(CASE WHEN type = 'bank_charge_reversal'              THEN amount ELSE 0 END), 0) as bank_charge_reversals
         ")->first();
 
         $totalIn  = (float) ($agg->total_in  ?? 0);
@@ -113,6 +121,7 @@ class AdminFinancialReportController extends Controller
                 'deposits'      => round((float) ($agg->deposits      ?? 0), 2),
                 'withdrawals'   => round((float) ($agg->withdrawals   ?? 0), 2),
                 'expenses'      => round((float) ($agg->expenses      ?? 0), 2),
+                'bank_charges'  => round((float) (($agg->bank_charges ?? 0) - ($agg->bank_charge_reversals ?? 0)), 2),
             ],
         ]);
     }
@@ -171,7 +180,7 @@ class AdminFinancialReportController extends Controller
             $totalOut = $txRows->where('direction', 'out')->sum('total');
             $sales    = $txRows->where('type', 'sale')->sum('total');
             $deposits = $txRows->whereIn('type', ['admin_deposit', 'manager_deposit'])->sum('total');
-            $expenses = $txRows->whereIn('type', ['admin_withdrawal', 'manager_expense'])->sum('total');
+            $expenses = $txRows->whereIn('type', ['admin_withdrawal', 'manager_expense', 'bank_charge'])->sum('total');
             $refunds  = $txRows->where('type', 'refund')->sum('total');
 
             return [

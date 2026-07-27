@@ -32,7 +32,10 @@ class SupplierPaymentController extends Controller
         $invoice = Supply::findOrFail($data['supply_id']);
         $safe = Safe::findOrFail($data['safe_id']);
 
-        $payment = $this->service->pay($invoice, $safe, (int) $data['currency_id'], (float) $data['amount'], $request->user(), $data['note'] ?? null);
+        $payment = $this->service->pay(
+            $invoice, $safe, (int) $data['currency_id'], (float) $data['amount'], $request->user(),
+            $data['note'] ?? null, isset($data['payment_method_id']) ? (int) $data['payment_method_id'] : null
+        );
 
         return response()->json(['message' => 'تم تسجيل دفعة المورد بنجاح', 'data' => $payment], 201);
     }

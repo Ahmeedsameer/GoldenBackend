@@ -80,4 +80,16 @@ class SupplyController extends Controller
             'message' => 'تم حذف التوريد وجميع أصنافه من المستودع بنجاح',
         ]);
     }
+
+    /** POST /api/stock/supplies/{id}/cancel — admin or manager only (route-gated). */
+    public function cancel(string $id)
+    {
+        $supply = Supply::findOrFail($id);
+        $cancelled = $this->supplyService->cancel($supply, request()->user());
+
+        return response()->json([
+            'message' => 'تم إلغاء فاتورة التوريد بنجاح',
+            'data'    => $cancelled,
+        ]);
+    }
 }

@@ -22,6 +22,24 @@ class InvoiceItem extends Model
         'price'    => 'decimal:2',
     ];
 
+    protected $appends = ['unit_cost', 'line_cost', 'line_profit'];
+
+    /** Real FIFO cost of the exact batch this line was sold from; falls back to the product's average purchase cost. */
+    public function getUnitCostAttribute(): float
+    {
+        return (float) ($this->goods?->supplyItem?->unit_price ?? $this->product?->purchase_cost ?? 0);
+    }
+
+    public function getLineCostAttribute(): float
+    {
+        return round($this->unit_cost * (float) $this->quantity, 2);
+    }
+
+    public function getLineProfitAttribute(): float
+    {
+        return round(((float) $this->price * (float) $this->quantity) - $this->line_cost, 2);
+    }
+
     public function invoice(): BelongsTo
     {
         return $this->belongsTo(Invoice::class);
