@@ -73,6 +73,7 @@ class SupplierPaymentService
             $this->safeService->recordSupplierPayment(
                 $lineSafe, $payment, $currencyId, round($amount + $feeAmount, 2), $user->id,
                 $note ?? "دفعة لفاتورة توريد {$invoice->invoice_number} — المورد: {$supplierName}",
+                $method?->id,
             );
 
             return $payment->load(['safe.safeType', 'safe.shop:id,name', 'currency', 'user:id,name', 'paymentMethod:id,name']);

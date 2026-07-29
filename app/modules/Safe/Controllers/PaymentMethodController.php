@@ -68,12 +68,20 @@ class PaymentMethodController extends Controller
         ]);
     }
 
-    /** A processing fee only ever means something on a card type — never trust the client to have hidden the field correctly. */
+    /**
+     * A processing fee and Bank only ever mean something on a card type, and
+     * a wallet phone only ever means something on a mobile_wallet — never
+     * trust the client to have hidden the fields correctly.
+     */
     private function normalizeFee(array $data): array
     {
         $type = $data['type'] ?? null;
         if ($type && ! in_array($type, PaymentMethod::CARD_TYPES, true)) {
             $data['processing_fee_percent'] = 0;
+            $data['bank'] = null;
+        }
+        if ($type && $type !== 'mobile_wallet') {
+            $data['wallet_phone'] = null;
         }
 
         return $data;

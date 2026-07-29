@@ -5,6 +5,8 @@ namespace App\Http\Controllers\Admin;
 use App\Http\Controllers\Controller;
 use App\Models\InvoicePayment;
 use App\Models\PaymentMethod;
+use App\Models\Safe;
+use App\Modules\Safe\Services\SafeService;
 use App\Services\Reports\ReportExportService;
 use Illuminate\Http\Request;
 
@@ -24,7 +26,7 @@ class AdminPaymentMethodReportController extends Controller
         'bank_transfer' => 'تحويل بنكي', 'other' => 'أخرى',
     ];
 
-    public function __construct(private ReportExportService $exportService) {}
+    public function __construct(private ReportExportService $exportService, private SafeService $safeService) {}
 
     private function parseDates(Request $request): array
     {
@@ -35,7 +37,11 @@ class AdminPaymentMethodReportController extends Controller
         return [now()->startOfMonth()->toDateString(), now()->toDateString()];
     }
 
-    /** GET /api/admin/reports/payment-methods — gross/fee/net totals per payment method. */
+    /**
+     * GET /api/admin/reports/payment-methods — gross/fee/net totals per payment method.
+     * Optional filters: shop_id (branch), payment_method_id, type (cash/visa/mastercard/bank_card/mobile_wallet/bank_transfer/other).
+     * "Daily Cash/Cards/Wallets" = this same endpoint with date_from=date_to=today + type filter — no separate report needed.
+     */
     public function paymentMethods(Request $request)
     {
         [$from, $to] = $this->parseDates($request);
@@ -46,6 +52,10 @@ class AdminPaymentMethodReportController extends Controller
             ->where('invoices.status', 'approved')
             ->whereBetween('invoices.date', [$from, $to])
             ->whereNotNull('invoice_payments.payment_method_id')
+            ->when($request->filled('shop_id'), fn ($q) => $q->where('invoices.shop_id', $request->integer('shop_id')))
+            ->when($request->filled('payment_method_id'), fn ($q) => $q->where('invoice_payments.payment_method_id', $request->integer('payment_method_id')))
+            ->when($request->filled('type'), fn ($q) => $q->join('payment_methods', 'invoice_payments.payment_method_id', '=', 'payment_methods.id')
+                ->where('payment_methods.type', $request->get('type')))
             ->selectRaw('
                 invoice_payments.payment_method_id                                             as method_id,
                 COUNT(*)                                                                        as payment_count,
@@ -57,7 +67,11 @@ class AdminPaymentMethodReportController extends Controller
             ->get()
             ->keyBy('method_id');
 
-        $data = PaymentMethod::orderBy('name')->get()->map(function (PaymentMethod $m) use ($rows) {
+        $methodsQuery = PaymentMethod::orderBy('name');
+        if ($request->filled('payment_method_id')) $methodsQuery->where('id', $request->integer('payment_method_id'));
+        if ($request->filled('type')) $methodsQuery->where('type', $request->get('type'));
+
+        $data = $methodsQuery->get()->map(function (PaymentMethod $m) use ($rows) {
             $row = $rows->get($m->id);
             return [
                 'id' => $m->id, 'name' => $m->name, 'type' => $m->type, 'type_label' => self::TYPE_LABELS[$m->type] ?? $m->type,
@@ -117,7 +131,12 @@ class AdminPaymentMethodReportController extends Controller
         return response()->json(['message' => 'ok', 'data' => ['period' => ['from' => $from, 'to' => $to], 'total_fees' => $totalFees, 'rows' => $data->values()]]);
     }
 
-    /** GET /api/admin/reports/payment-methods/bank-charges — grouped by bank (method name) + card type, with average fee. */
+    /**
+     * GET /api/admin/reports/payment-methods/bank-charges — grouped by real
+     * Bank (Bank Cards module — `payment_methods.bank`, falling back to
+     * `name` for rows created before that column existed) + card type, with
+     * average fee. Also returns `total_net_revenue` ("Net Card Revenue").
+     */
     public function bankCharges(Request $request)
     {
         [$from, $to] = $this->parseDates($request);
@@ -129,18 +148,19 @@ class AdminPaymentMethodReportController extends Controller
             ->where('invoice_payments.processing_fee_amount', '>', 0)
             ->whereBetween('invoices.date', [$from, $to])
             ->selectRaw('
-                payment_methods.name                                     as bank,
+                COALESCE(payment_methods.bank, payment_methods.name)     as bank,
                 payment_methods.type                                     as card_type,
                 COUNT(*)                                                 as charge_count,
                 COALESCE(SUM(invoice_payments.amount), 0)                as gross_amount,
                 COALESCE(SUM(invoice_payments.processing_fee_amount), 0) as fee_amount,
                 COALESCE(SUM(invoice_payments.net_amount), 0)            as net_amount
             ')
-            ->groupBy('payment_methods.name', 'payment_methods.type')
+            ->groupBy(\Illuminate\Support\Facades\DB::raw('COALESCE(payment_methods.bank, payment_methods.name)'), 'payment_methods.type')
             ->orderByDesc('fee_amount')
             ->get();
 
         $totalFees = round((float) $rows->sum('fee_amount'), 2);
+        $totalNetRevenue = round((float) $rows->sum('net_amount'), 2);
 
         $data = $rows->map(fn ($r) => [
             'bank' => $r->bank, 'card_type' => $r->card_type, 'card_type_label' => self::TYPE_LABELS[$r->card_type] ?? $r->card_type,
@@ -151,7 +171,7 @@ class AdminPaymentMethodReportController extends Controller
         ]);
 
         if ($request->filled('format')) {
-            $columns = ['البنك / الوسيلة', 'نوع البطاقة', 'عدد العمليات', 'إجمالي المبلغ', 'إجمالي الرسوم', 'متوسط الرسوم', 'الصافي المودع'];
+            $columns = ['البنك', 'نوع البطاقة', 'عدد العمليات', 'إجمالي المبلغ', 'إجمالي الرسوم', 'متوسط الرسوم', 'الصافي المودع'];
             $tableRows = $data->map(fn ($r) => [$r['bank'], $r['card_type_label'], $r['charge_count'], $r['gross_amount'], $r['fee_amount'], $r['avg_fee'], $r['net_amount']])->all();
 
             return $request->input('format') === 'excel'
@@ -159,7 +179,7 @@ class AdminPaymentMethodReportController extends Controller
                 : $this->exportService->pdf('تقرير رسوم البنك', $columns, $tableRows, ['من' => $from, 'إلى' => $to]);
         }
 
-        return response()->json(['message' => 'ok', 'data' => ['period' => ['from' => $from, 'to' => $to], 'total_fees' => $totalFees, 'rows' => $data->values()]]);
+        return response()->json(['message' => 'ok', 'data' => ['period' => ['from' => $from, 'to' => $to], 'total_fees' => $totalFees, 'total_net_revenue' => $totalNetRevenue, 'rows' => $data->values()]]);
     }
 
     /** GET /api/admin/reports/payment-methods/branch-payments — payment distribution grouped by branch, then by method within each branch. */
@@ -270,5 +290,96 @@ class AdminPaymentMethodReportController extends Controller
         }
 
         return response()->json(['message' => 'ok', 'data' => ['period' => ['from' => $from, 'to' => $to], 'rows' => $data]]);
+    }
+
+    /**
+     * GET /api/admin/reports/payment-methods/safe-balance — current (point-in-time)
+     * balance per safe, broken down by currency + payment method. Reuses
+     * SafeService::getBalancesByPaymentMethod() — the exact same derived figures
+     * shown on the Safe detail pages, just flattened for the report table.
+     * Optional filters: shop_id, currency_id, payment_method_id.
+     */
+    public function balanceByPaymentMethod(Request $request)
+    {
+        $safes = Safe::with(['safeType', 'shop:id,name'])->where('is_active', true)
+            ->when($request->filled('shop_id'), fn ($q) => $q->where('shop_id', $request->integer('shop_id')))
+            ->get();
+
+        $byMethod = $this->safeService->getBalancesByPaymentMethod($safes->pluck('id')->all());
+
+        $rows = collect();
+        foreach ($safes as $safe) {
+            foreach ($byMethod[$safe->id] ?? [] as $currencyId => $entry) {
+                if ($request->filled('currency_id') && (int) $request->integer('currency_id') !== (int) $currencyId) continue;
+
+                foreach ($entry['methods'] as $m) {
+                    if ($request->filled('payment_method_id') && (int) $request->integer('payment_method_id') !== (int) ($m['payment_method_id'] ?? 0)) continue;
+
+                    $rows->push([
+                        'branch'    => $safe->shop?->name ?? 'الشركة',
+                        'safe'      => $safe->safeType?->name,
+                        'currency_id' => $currencyId,
+                        'method'    => $m['name'],
+                        'balance'   => $m['balance'],
+                    ]);
+                }
+            }
+        }
+
+        if ($request->filled('format')) {
+            $columns = ['الفرع', 'الخزنة', 'وسيلة الدفع', 'الرصيد'];
+            $tableRows = $rows->map(fn ($r) => [$r['branch'], $r['safe'], $r['method'], $r['balance']])->all();
+
+            return $request->input('format') === 'excel'
+                ? $this->exportService->excel('رصيد الخزنة حسب وسيلة الدفع', $columns, $tableRows, [], [3])
+                : $this->exportService->pdf('رصيد الخزنة حسب وسيلة الدفع', $columns, $tableRows, []);
+        }
+
+        return response()->json(['message' => 'ok', 'data' => ['rows' => $rows->values()]]);
+    }
+
+    /**
+     * GET /api/admin/reports/payment-methods/child-transfers — every transfer
+     * between two child safes (payment methods) — either within the same
+     * branch safe or across branches. Reads directly from `safe_transfers`
+     * (no new table); rows with both payment-method columns null are ordinary
+     * whole-safe transfers and excluded here, they already have their own
+     * "Transfers" list elsewhere. Optional filters: shop_id, date_from, date_to.
+     */
+    public function childSafeTransfers(Request $request)
+    {
+        [$from, $to] = $this->parseDates($request);
+
+        $rows = \App\Models\SafeTransfer::query()
+            ->with(['fromSafe.shop:id,name', 'toSafe.shop:id,name', 'currency:id,code,symbol', 'fromPaymentMethod:id,name', 'toPaymentMethod:id,name', 'admin:id,name'])
+            ->whereNotNull('from_payment_method_id')
+            ->whereNotNull('to_payment_method_id')
+            ->whereBetween('created_at', ["{$from} 00:00:00", "{$to} 23:59:59"])
+            ->when($request->filled('shop_id'), fn ($q) => $q->whereHas('fromSafe', fn ($sq) => $sq->where('shop_id', $request->integer('shop_id'))))
+            ->latest()
+            ->get();
+
+        $data = $rows->map(fn ($t) => [
+            'date'         => $t->created_at?->toDateTimeString(),
+            'branch'       => $t->fromSafe?->shop?->name ?? 'الشركة',
+            'same_branch'  => $t->from_safe_id === $t->to_safe_id,
+            'from_method'  => $t->fromPaymentMethod?->name,
+            'to_method'    => $t->toPaymentMethod?->name,
+            'currency'     => $t->currency?->code,
+            'amount'       => (float) $t->amount,
+            'admin'        => $t->admin?->name,
+            'note'         => $t->note,
+        ]);
+
+        if ($request->filled('format')) {
+            $columns = ['التاريخ', 'الفرع', 'من وسيلة', 'إلى وسيلة', 'العملة', 'المبلغ', 'بواسطة'];
+            $tableRows = $data->map(fn ($r) => [$r['date'], $r['branch'], $r['from_method'], $r['to_method'], $r['currency'], $r['amount'], $r['admin']])->all();
+
+            return $request->input('format') === 'excel'
+                ? $this->exportService->excel('التحويلات بين وسائل الدفع', $columns, $tableRows, ['من' => $from, 'إلى' => $to], [5])
+                : $this->exportService->pdf('التحويلات بين وسائل الدفع', $columns, $tableRows, ['من' => $from, 'إلى' => $to]);
+        }
+
+        return response()->json(['message' => 'ok', 'data' => ['period' => ['from' => $from, 'to' => $to], 'rows' => $data->values()]]);
     }
 }

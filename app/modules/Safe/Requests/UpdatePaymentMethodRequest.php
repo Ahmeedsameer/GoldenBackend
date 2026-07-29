@@ -16,6 +16,8 @@ class UpdatePaymentMethodRequest extends FormRequest
     {
         return [
             'name' => ['sometimes', 'string', 'max:100'],
+            'bank' => ['nullable', 'string', 'max:100'],
+            'wallet_phone' => ['nullable', 'string', 'max:30'],
             'type' => ['sometimes', 'string', 'in:' . implode(',', PaymentMethod::TYPES)],
             'currency_id' => ['sometimes', 'integer', 'exists:currencies,id'],
             'processing_fee_percent' => ['nullable', 'numeric', 'min:0', 'max:100'],

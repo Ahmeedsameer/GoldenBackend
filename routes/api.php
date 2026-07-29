@@ -30,6 +30,7 @@ use App\Modules\Convention\Controllers\ManagerConventionController;
 use App\Modules\Convention\Controllers\NotificationController;
 use App\Modules\Pricing\Controllers\PricingController;
 use App\Modules\BranchOperations\Controllers\TransferRequestController;
+use App\Modules\BranchOperations\Controllers\RequiredMaterialsController;
 use App\Modules\BranchOperations\Controllers\WasteController;
 use App\Modules\BranchOperations\Controllers\InventoryAdjustmentController;
 use App\Modules\BranchOperations\Controllers\InventoryCountController;
@@ -264,6 +265,8 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::get('bank-charges',     [AdminPaymentMethodReportController::class, 'bankCharges']);
         Route::get('branch-payments',  [AdminPaymentMethodReportController::class, 'branchPayments']);
         Route::get('currency',         [AdminPaymentMethodReportController::class, 'currencyReport']);
+        Route::get('safe-balance',     [AdminPaymentMethodReportController::class, 'balanceByPaymentMethod']);
+        Route::get('child-transfers',  [AdminPaymentMethodReportController::class, 'childSafeTransfers']);
     });
 
     // ── Admin Home Dashboard ──────────────────────────────────────────────────────
@@ -310,6 +313,12 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
     Route::group(['prefix' => 'admin/reports/monthly-profit'], function () {
         Route::get('', [AdminMonthlyProfitController::class, 'trend']);
         Route::get('export', [AdminMonthlyProfitController::class, 'export']);
+    });
+
+    // ── Branch Required Materials — admin cross-branch report (manager's own-branch
+    // endpoint is in the manager-role group below) ──────────────────────────────
+    Route::group(['prefix' => 'admin/reports/required-materials'], function () {
+        Route::get('', [RequiredMaterialsController::class, 'report']);
     });
 
     // ── Stock Intelligence (admin: cross-shop) ───────────────────────────────────
@@ -550,6 +559,12 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 
 // endpoint with ?warehouse_source=1 — no separate list/detail/report endpoint.
 Route::group(['middleware' => ['api', CheckRole::class . ':manager'], 'prefix' => 'branch-operations/stock-requests'], function () {
     Route::post('', [TransferRequestController::class, 'storeStockRequest']);
+});
+
+// ── Branch Required Materials — manager's own-branch dashboard (admin's cross-branch
+// report is at admin/reports/required-materials above; both share RequiredMaterialsService) ──
+Route::group(['middleware' => ['api', CheckRole::class . ':manager'], 'prefix' => 'branch-operations/required-materials'], function () {
+    Route::get('', [RequiredMaterialsController::class, 'index']);
 });
 
 // ── Waste Management (Part 7) — read: all roles (shop-scoped); register: admin+manager ──

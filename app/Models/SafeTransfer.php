@@ -12,6 +12,8 @@ class SafeTransfer extends Model
         'from_safe_id',
         'to_safe_id',
         'currency_id',
+        'from_payment_method_id',
+        'to_payment_method_id',
         'amount',
         'note',
         'admin_id',
@@ -37,6 +39,17 @@ class SafeTransfer extends Model
     public function admin(): BelongsTo
     {
         return $this->belongsTo(User::class, 'admin_id');
+    }
+
+    /** Sub Safes: null on both = ordinary cross-branch/whole-safe transfer (unchanged behavior). */
+    public function fromPaymentMethod(): BelongsTo
+    {
+        return $this->belongsTo(PaymentMethod::class, 'from_payment_method_id');
+    }
+
+    public function toPaymentMethod(): BelongsTo
+    {
+        return $this->belongsTo(PaymentMethod::class, 'to_payment_method_id');
     }
 
     public function transactions(): HasMany

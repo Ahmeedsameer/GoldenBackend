@@ -11,10 +11,12 @@ class ManagerSafeTransactionRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'currency_id' => ['required', 'exists:currencies,id'],
-            'amount'      => ['required', 'numeric', 'min:0.01'],
-            'reason_id'   => ['required', 'exists:transaction_reasons,id'],
-            'note'        => ['nullable', 'string', 'max:500'],
+            'currency_id'       => ['required', 'exists:currencies,id'],
+            'amount'            => ['required', 'numeric', 'min:0.01'],
+            'reason_id'         => ['required', 'exists:transaction_reasons,id'],
+            'note'              => ['nullable', 'string', 'max:500'],
+            // Sub Safes: null = "Entire Safe (Automatic)", exactly today's behavior.
+            'payment_method_id' => ['nullable', 'exists:payment_methods,id'],
         ];
     }
 

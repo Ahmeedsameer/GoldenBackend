@@ -21,7 +21,7 @@ class PaymentMethod extends Model
 
     public const TYPES = ['cash', 'visa', 'mastercard', 'bank_card', 'mobile_wallet', 'bank_transfer', 'other'];
 
-    protected $fillable = ['name', 'type', 'currency_id', 'safe_id', 'processing_fee_percent', 'is_active'];
+    protected $fillable = ['name', 'bank', 'wallet_phone', 'type', 'currency_id', 'safe_id', 'processing_fee_percent', 'is_active'];
 
     protected $casts = [
         'processing_fee_percent' => 'decimal:2',

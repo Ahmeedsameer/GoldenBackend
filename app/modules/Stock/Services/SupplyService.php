@@ -288,7 +288,8 @@ class SupplyService
                     $payment->currency_id,
                     round((float) $payment->amount + (float) $payment->processing_fee_amount, 2),
                     $user->id,
-                    "استرجاع دفعة بسبب إلغاء فاتورة التوريد {$supply->invoice_number}"
+                    "استرجاع دفعة بسبب إلغاء فاتورة التوريد {$supply->invoice_number}",
+                    $payment->payment_method_id
                 );
             }
 

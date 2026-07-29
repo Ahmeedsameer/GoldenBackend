@@ -427,13 +427,13 @@ class SalesService
                     ]);
 
                     $this->safeService->recordSaleTransaction(
-                        $lineSafe, $invoice, (int) $payment['currency_id'], $grossAmount, $seller->id, $invoicePayment->id
+                        $lineSafe, $invoice, (int) $payment['currency_id'], $grossAmount, $seller->id, $invoicePayment->id, $method->id
                     );
 
                     if ($feeAmount > 0) {
                         $this->safeService->recordBankCharge(
                             $lineSafe, $invoice, (int) $payment['currency_id'], $feeAmount, $seller->id, $invoicePayment->id,
-                            "رسوم معالجة دفعة عبر {$method->name} — فاتورة رقم {$invoice->id}"
+                            "رسوم معالجة دفعة عبر {$method->name} — فاتورة رقم {$invoice->id}", $method->id
                         );
                     }
                 }
@@ -1220,11 +1220,11 @@ class SalesService
                     // reversals net out to a perfectly valid final balance.
                     if ((float) $payment->processing_fee_amount > 0) {
                         $this->safeService->recordBankChargeReversal(
-                            $payment->safe, $invoice, $payment->currency_id, (float) $payment->processing_fee_amount, $user->id, $payment->id, $note
+                            $payment->safe, $invoice, $payment->currency_id, (float) $payment->processing_fee_amount, $user->id, $payment->id, $note, $payment->payment_method_id
                         );
                     }
                     $this->safeService->recordSaleRefund(
-                        $payment->safe, $invoice, $payment->currency_id, (float) $payment->amount, $user->id, $note, $payment->id
+                        $payment->safe, $invoice, $payment->currency_id, (float) $payment->amount, $user->id, $note, $payment->id, $payment->payment_method_id
                     );
                 }
             } else {

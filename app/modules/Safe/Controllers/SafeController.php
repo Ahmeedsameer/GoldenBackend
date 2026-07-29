@@ -41,7 +41,7 @@ class SafeController extends Controller
     public function adminTransactions(string $safeId)
     {
         $safe    = Safe::findOrFail($safeId);
-        $filters = request()->only(['type', 'direction', 'currency_id', 'date_from', 'date_to']);
+        $filters = request()->only(['type', 'direction', 'currency_id', 'date_from', 'date_to', 'payment_method_id']);
         $perPage = request()->integer('per_page', 20);
 
         return response()->json([
@@ -59,12 +59,13 @@ class SafeController extends Controller
 
         $tx = $this->safeService->adminDeposit(
             $safe, (int) $v['currency_id'], (float) $v['amount'],
-            (int) $v['reason_id'], $v['note'] ?? null, auth()->id()
+            (int) $v['reason_id'], $v['note'] ?? null, auth()->id(),
+            isset($v['payment_method_id']) ? (int) $v['payment_method_id'] : null
         );
 
         return response()->json([
             'message'     => 'تم الإيداع بنجاح',
-            'transaction' => $tx->load('currency', 'reason', 'user:id,name'),
+            'transaction' => $tx->load('currency', 'reason', 'user:id,name', 'paymentMethod:id,name'),
             'new_balance' => SafeService::currentBalance($safe->id, (int) $v['currency_id']),
         ]);
     }
@@ -77,17 +78,18 @@ class SafeController extends Controller
 
         $tx = $this->safeService->adminWithdraw(
             $safe, (int) $v['currency_id'], (float) $v['amount'],
-            (int) $v['reason_id'], $v['note'] ?? null, auth()->id()
+            (int) $v['reason_id'], $v['note'] ?? null, auth()->id(),
+            isset($v['payment_method_id']) ? (int) $v['payment_method_id'] : null
         );
 
         return response()->json([
             'message'     => 'تم السحب بنجاح',
-            'transaction' => $tx->load('currency', 'reason', 'user:id,name'),
+            'transaction' => $tx->load('currency', 'reason', 'user:id,name', 'paymentMethod:id,name'),
             'new_balance' => SafeService::currentBalance($safe->id, (int) $v['currency_id']),
         ]);
     }
 
-    /** POST /api/safe/transfer */
+    /** POST /api/safe/transfer — also covers same-branch child-safe (payment method) transfers, see SafeTransferRequest. */
     public function transfer(SafeTransferRequest $request)
     {
         $v        = $request->validated();
@@ -98,11 +100,13 @@ class SafeController extends Controller
             (int) $v['currency_id'],
             (float) $v['amount'],
             $v['note'] ?? null,
-            auth()->id()
+            auth()->id(),
+            isset($v['from_payment_method_id']) ? (int) $v['from_payment_method_id'] : null,
+            isset($v['to_payment_method_id']) ? (int) $v['to_payment_method_id'] : null
         );
 
         return response()->json([
-            'message' => 'تم التحويل بين الخزنتين بنجاح',
+            'message' => 'تم التحويل بنجاح',
             'data'    => $transfer,
         ]);
     }
@@ -122,7 +126,7 @@ class SafeController extends Controller
     public function managerTransactions(string $safeId)
     {
         $safe    = $this->safeService->getManagerSafeById((int) $safeId);
-        $filters = request()->only(['type', 'direction', 'currency_id', 'date_from', 'date_to']);
+        $filters = request()->only(['type', 'direction', 'currency_id', 'date_from', 'date_to', 'payment_method_id']);
         $perPage = request()->integer('per_page', 20);
 
         return response()->json([
@@ -140,12 +144,13 @@ class SafeController extends Controller
 
         $tx = $this->safeService->managerDeposit(
             $safe, (int) $v['currency_id'], (float) $v['amount'],
-            (int) $v['reason_id'], $v['note'] ?? null, auth()->id()
+            (int) $v['reason_id'], $v['note'] ?? null, auth()->id(),
+            isset($v['payment_method_id']) ? (int) $v['payment_method_id'] : null
         );
 
         return response()->json([
             'message'     => 'تم الإيداع بنجاح',
-            'transaction' => $tx->load('currency', 'reason', 'user:id,name'),
+            'transaction' => $tx->load('currency', 'reason', 'user:id,name', 'paymentMethod:id,name'),
             'new_balance' => SafeService::currentBalance($safe->id, (int) $v['currency_id']),
         ]);
     }
@@ -158,12 +163,13 @@ class SafeController extends Controller
 
         $tx = $this->safeService->managerWithdraw(
             $safe, (int) $v['currency_id'], (float) $v['amount'],
-            (int) $v['reason_id'], $v['note'] ?? null, auth()->id()
+            (int) $v['reason_id'], $v['note'] ?? null, auth()->id(),
+            isset($v['payment_method_id']) ? (int) $v['payment_method_id'] : null
         );
 
         return response()->json([
             'message'     => 'تم السحب بنجاح',
-            'transaction' => $tx->load('currency', 'reason', 'user:id,name'),
+            'transaction' => $tx->load('currency', 'reason', 'user:id,name', 'paymentMethod:id,name'),
             'new_balance' => SafeService::currentBalance($safe->id, (int) $v['currency_id']),
         ]);
     }

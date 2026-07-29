@@ -40,6 +40,7 @@ class SafeTransaction extends Model
         'salary_advance_id',
         'supplier_payment_id',
         'invoice_payment_id',
+        'payment_method_id',
         'user_id',
     ];
 
@@ -84,6 +85,18 @@ class SafeTransaction extends Model
     public function invoicePayment(): BelongsTo
     {
         return $this->belongsTo(InvoicePayment::class);
+    }
+
+    /**
+     * Sub Safes: the child safe (payment method) this row belongs to, set directly
+     * at write time. Sales/refunds/bank charges also have this reachable indirectly
+     * via invoicePayment.paymentMethod (historical rows before this column existed
+     * only have the indirect path) — callers needing "whichever is set" should
+     * COALESCE both, see SafeService::getBalancesByPaymentMethod().
+     */
+    public function paymentMethod(): BelongsTo
+    {
+        return $this->belongsTo(PaymentMethod::class);
     }
 
     public function user(): BelongsTo

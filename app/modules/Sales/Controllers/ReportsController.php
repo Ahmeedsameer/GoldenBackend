@@ -85,15 +85,21 @@ class ReportsController extends Controller
     // convention as before, now driven by the payment_methods table
     // instead of the old hardcoded 2-value enum.
     // ────────────────────────────────────────────────────────────────
-    private function paymentMethodBreakdown(int $shopId, string $from, string $to): array
+    /** Shared filtered base — shop/status/date rules for every payment-method breakdown below. */
+    private function paymentMethodPaymentsQuery(int $shopId, string $from, string $to)
     {
-        $rows = \App\Models\InvoicePayment::query()
+        return \App\Models\InvoicePayment::query()
             ->join('invoices',   'invoice_payments.invoice_id',  '=', 'invoices.id')
             ->join('currencies', 'invoice_payments.currency_id', '=', 'currencies.id')
             ->where('invoices.shop_id', $shopId)
             ->where('invoices.status',  'approved')
             ->whereBetween('invoices.date', [$from, $to])
-            ->whereNotNull('invoice_payments.payment_method_id')
+            ->whereNotNull('invoice_payments.payment_method_id');
+    }
+
+    private function paymentMethodBreakdown(int $shopId, string $from, string $to): array
+    {
+        $rows = $this->paymentMethodPaymentsQuery($shopId, $from, $to)
             ->selectRaw('
                 invoice_payments.payment_method_id                                     as method_id,
                 COUNT(*)                                                                as payment_count,
@@ -116,6 +122,45 @@ class ReportsController extends Controller
     }
 
     /**
+     * Same period/shop rule as paymentMethodBreakdown(), but grouped by
+     * (currency, payment method) with native (non-EGP-converted) amounts —
+     * powers the Safe Reconciliation page's "today's sales by payment
+     * method, per currency" table.
+     */
+    private function paymentMethodBreakdownByCurrency(int $shopId, string $from, string $to): array
+    {
+        $rows = $this->paymentMethodPaymentsQuery($shopId, $from, $to)
+            ->selectRaw('
+                currencies.id                       as currency_id,
+                currencies.code                     as currency_code,
+                currencies.symbol                   as currency_symbol,
+                invoice_payments.payment_method_id   as method_id,
+                COUNT(*)                             as payment_count,
+                COALESCE(SUM(invoice_payments.amount), 0) as amount
+            ')
+            ->groupBy('currencies.id', 'currencies.code', 'currencies.symbol', 'invoice_payments.payment_method_id')
+            ->get();
+
+        $methodNames = PaymentMethod::pluck('name', 'id');
+
+        $byCurrency = [];
+        foreach ($rows as $row) {
+            $byCurrency[$row->currency_id]['currency'] = [
+                'id' => $row->currency_id, 'code' => $row->currency_code, 'symbol' => $row->currency_symbol,
+            ];
+            $byCurrency[$row->currency_id]['total'] = round(($byCurrency[$row->currency_id]['total'] ?? 0) + (float) $row->amount, 2);
+            $byCurrency[$row->currency_id]['methods'][] = [
+                'method'        => $row->method_id,
+                'label'         => $methodNames->get($row->method_id) ?? 'غير معروف',
+                'amount'        => round((float) $row->amount, 2),
+                'payment_count' => (int) $row->payment_count,
+            ];
+        }
+
+        return array_values($byCurrency);
+    }
+
+    /**
      * GET /api/manager/reports/payment-methods-breakdown?date=YYYY-MM-DD
      * Per-payment-method totals for the manager's own shop on a single day —
      * powers the Safe Reconciliation page's breakdown table (no real
@@ -130,7 +175,11 @@ class ReportsController extends Controller
 
         return response()->json([
             'message' => 'ok',
-            'data' => ['date' => $date, 'methods' => $this->paymentMethodBreakdown($shopId, $date, $date)],
+            'data' => [
+                'date'        => $date,
+                'methods'     => $this->paymentMethodBreakdown($shopId, $date, $date),
+                'by_currency' => $this->paymentMethodBreakdownByCurrency($shopId, $date, $date),
+            ],
         ]);
     }
 

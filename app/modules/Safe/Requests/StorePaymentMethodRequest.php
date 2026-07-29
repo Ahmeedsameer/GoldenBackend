@@ -16,6 +16,12 @@ class StorePaymentMethodRequest extends FormRequest
     {
         return [
             'name' => ['required', 'string', 'max:100'],
+            // Bank Cards module — the issuing bank (CIB, QNB, Banque Misr, HSBC, ...),
+            // only meaningful for card types, same "server never trusts the frontend
+            // hiding it" pattern as processing_fee_percent.
+            'bank' => ['nullable', 'string', 'max:100'],
+            // Mobile wallet methods (Vodafone Cash, InstaPay, ...) capture the wallet's phone number at creation.
+            'wallet_phone' => ['nullable', 'string', 'max:30'],
             'type' => ['required', 'string', 'in:' . implode(',', PaymentMethod::TYPES)],
             'currency_id' => ['required', 'integer', 'exists:currencies,id'],
             // Only meaningful for card types — SalesController/frontend hide the field

@@ -83,7 +83,7 @@ class SupplierService
      */
     public function ledger(Supplier $supplier): array
     {
-        $invoices = $supplier->supplies()->with('items', 'payments.safe.shop:id,name', 'payments.currency', 'payments.user:id,name')->latest('date')->latest('id')->get();
+        $invoices = $supplier->supplies()->with('items.product:id,name', 'payments.safe.shop:id,name', 'payments.currency', 'payments.user:id,name')->latest('date')->latest('id')->get();
 
         $totalInvoiced = round((float) $invoices->sum('total_amount'), 2);
         $totalPaid     = round((float) $invoices->sum('paid_amount'), 2);
@@ -102,6 +102,7 @@ class SupplierService
                 'items_subtotal' => $s->items_subtotal, 'discount' => (float) $s->discount, 'tax' => (float) $s->tax,
                 'total_amount' => $s->total_amount, 'paid_amount' => (float) $s->paid_amount,
                 'remaining_amount' => $s->remaining_amount, 'payment_status' => $s->payment_status,
+                'products' => $s->items->pluck('product.name')->filter()->unique()->values(),
             ])->values(),
             'payments' => $invoices->flatMap(fn ($s) => $s->payments->map(fn ($p) => [
                 'id' => $p->id, 'supply_id' => $s->id, 'invoice_number' => $s->invoice_number,
