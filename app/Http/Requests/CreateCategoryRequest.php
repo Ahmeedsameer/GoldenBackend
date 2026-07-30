@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class CreateCategoryRequest extends FormRequest
@@ -33,8 +34,8 @@ class CreateCategoryRequest extends FormRequest
         }
 
         return [
-            'name'                => 'required|string|unique:categories,name',
-            'description'         => 'nullable|string',
+            'name'                => ['required', 'string', 'unique:categories,name', new NoHtmlTags()],
+            'description'         => ['nullable', 'string', new NoHtmlTags()],
             'parent_id'           => 'nullable|exists:categories,id',
             'image'               => 'nullable|image|mimes:jpeg,png,jpg,gif,svg|max:2048',
             'product_type_id'     => 'required|exists:product_types,id',

@@ -3,6 +3,7 @@
 namespace App\Modules\Safe\Requests;
 
 use App\Models\PaymentMethod;
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class UpdatePaymentMethodRequest extends FormRequest
@@ -15,9 +16,9 @@ class UpdatePaymentMethodRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name' => ['sometimes', 'string', 'max:100'],
-            'bank' => ['nullable', 'string', 'max:100'],
-            'wallet_phone' => ['nullable', 'string', 'max:30'],
+            'name' => ['sometimes', 'string', 'max:100', new NoHtmlTags()],
+            'bank' => ['nullable', 'string', 'max:100', new NoHtmlTags()],
+            'wallet_phone' => ['nullable', 'string', 'max:30', new NoHtmlTags()],
             'type' => ['sometimes', 'string', 'in:' . implode(',', PaymentMethod::TYPES)],
             'currency_id' => ['sometimes', 'integer', 'exists:currencies,id'],
             'processing_fee_percent' => ['nullable', 'numeric', 'min:0', 'max:100'],

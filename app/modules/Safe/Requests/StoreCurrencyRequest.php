@@ -2,6 +2,7 @@
 
 namespace App\Modules\Safe\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreCurrencyRequest extends FormRequest
@@ -12,7 +13,7 @@ class StoreCurrencyRequest extends FormRequest
     {
         return [
             'code'   => ['required', 'string', 'max:10', 'unique:currencies,code'],
-            'name'   => ['required', 'string', 'max:100'],
+            'name'   => ['required', 'string', 'max:100', new NoHtmlTags()],
             'symbol' => ['required', 'string', 'max:10'],
             'rate'   => ['required', 'numeric', 'min:0.0001'],
         ];

@@ -3,6 +3,7 @@
 namespace App\Modules\Safe\Requests;
 
 use App\Models\PaymentMethod;
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StorePaymentMethodRequest extends FormRequest
@@ -15,13 +16,13 @@ class StorePaymentMethodRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name' => ['required', 'string', 'max:100'],
+            'name' => ['required', 'string', 'max:100', new NoHtmlTags()],
             // Bank Cards module — the issuing bank (CIB, QNB, Banque Misr, HSBC, ...),
             // only meaningful for card types, same "server never trusts the frontend
             // hiding it" pattern as processing_fee_percent.
-            'bank' => ['nullable', 'string', 'max:100'],
+            'bank' => ['nullable', 'string', 'max:100', new NoHtmlTags()],
             // Mobile wallet methods (Vodafone Cash, InstaPay, ...) capture the wallet's phone number at creation.
-            'wallet_phone' => ['nullable', 'string', 'max:30'],
+            'wallet_phone' => ['nullable', 'string', 'max:30', new NoHtmlTags()],
             'type' => ['required', 'string', 'in:' . implode(',', PaymentMethod::TYPES)],
             'currency_id' => ['required', 'integer', 'exists:currencies,id'],
             // Only meaningful for card types — SalesController/frontend hide the field

@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreUserRequest extends FormRequest
@@ -22,7 +23,7 @@ class StoreUserRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name' => 'required|string',
+            'name' => ['required', 'string', new NoHtmlTags()],
             'email' => 'required|email|unique:users,email',
             'password' => 'required|string|min:8|max:16',
             // This endpoint creates SYSTEM ADMIN accounts only. Managers and

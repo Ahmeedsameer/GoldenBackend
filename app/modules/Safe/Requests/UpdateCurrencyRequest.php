@@ -2,6 +2,7 @@
 
 namespace App\Modules\Safe\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class UpdateCurrencyRequest extends FormRequest
@@ -11,7 +12,7 @@ class UpdateCurrencyRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name'      => ['sometimes', 'required', 'string', 'max:100'],
+            'name'      => ['sometimes', 'required', 'string', 'max:100', new NoHtmlTags()],
             'symbol'    => ['sometimes', 'required', 'string', 'max:10'],
             'rate'      => ['sometimes', 'required', 'numeric', 'min:0.0001'],
             'is_active' => ['sometimes', 'required', 'boolean'],

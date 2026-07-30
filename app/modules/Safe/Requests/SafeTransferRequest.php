@@ -2,6 +2,7 @@
 
 namespace App\Modules\Safe\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class SafeTransferRequest extends FormRequest
@@ -18,7 +19,7 @@ class SafeTransferRequest extends FormRequest
             'to_safe_id'   => ['required', 'exists:safes,id'],
             'currency_id'  => ['required', 'exists:currencies,id'],
             'amount'       => ['required', 'numeric', 'min:0.01'],
-            'note'         => ['nullable', 'string', 'max:500'],
+            'note'         => ['nullable', 'string', 'max:500', new NoHtmlTags()],
             'from_payment_method_id' => ['nullable', 'exists:payment_methods,id'],
             'to_payment_method_id'   => ['nullable', 'exists:payment_methods,id'],
         ];

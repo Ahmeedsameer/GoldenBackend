@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use App\Models\Product;
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -24,12 +25,12 @@ class CreateProductRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name' => 'required|string|max:255',
+            'name' => ['required', 'string', 'max:255', new NoHtmlTags()],
             'image' => 'nullable|image|mimes:jpeg,png,jpg,gif,svg|max:2048',
             'sku' => 'nullable|string|max:100|unique:products,sku',
             'barcode' => 'nullable|string|max:100',
-            'description' => 'nullable|string',
-            'notes'       => 'nullable|string',
+            'description' => ['nullable', 'string', new NoHtmlTags()],
+            'notes'       => ['nullable', 'string', new NoHtmlTags()],
             'is_active' => 'required|in:true,false,1,0',
             'scalar' => 'required|in:kg,g,l,ml,pcs',
             'category_id' => 'required|exists:categories,id',

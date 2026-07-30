@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use App\Models\Product;
+use App\Rules\NoHtmlTags;
 
 /**
  * Ready Product (pre-bottled perfumes sold directly) — real inventory,
@@ -25,7 +26,7 @@ class StoreReadyProductRequest extends CreateProductRequest
     public function rules(): array
     {
         return [
-            'name'              => 'required|string|max:255',
+            'name'              => ['required', 'string', 'max:255', new NoHtmlTags()],
             'barcode'           => 'nullable|string|max:100',
             'is_active'         => 'nullable|in:true,false,1,0',
             // Piece, or weighed by gram/kilogram — kilogram is normalized to

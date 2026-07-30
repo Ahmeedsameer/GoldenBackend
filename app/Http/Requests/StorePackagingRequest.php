@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use App\Models\Product;
+use App\Rules\NoHtmlTags;
 
 /**
  * Packaging (bottles, boxes, wrapping) — inventory-only, never shown in the
@@ -31,7 +32,7 @@ class StorePackagingRequest extends CreateProductRequest
     public function rules(): array
     {
         return [
-            'name'              => 'required|string|max:255',
+            'name'              => ['required', 'string', 'max:255', new NoHtmlTags()],
             'barcode'           => 'nullable|string|max:100',
             'is_active'         => 'nullable|in:true,false,1,0',
             'scalar'            => 'in:pcs',

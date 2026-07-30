@@ -2,6 +2,7 @@
 
 namespace App\Modules\Safe\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class UpdateTransactionReasonRequest extends FormRequest
@@ -11,7 +12,7 @@ class UpdateTransactionReasonRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name'      => ['sometimes', 'required', 'string', 'max:150'],
+            'name'      => ['sometimes', 'required', 'string', 'max:150', new NoHtmlTags()],
             'direction' => ['sometimes', 'required', 'in:in,out,both'],
             'is_active' => ['sometimes', 'required', 'boolean'],
         ];

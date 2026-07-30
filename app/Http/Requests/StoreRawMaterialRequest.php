@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use App\Models\Product;
+use App\Rules\NoHtmlTags;
 
 /**
  * Raw Material (oils, alcohol, oud, carrier bases) — inventory-only, never
@@ -30,7 +31,7 @@ class StoreRawMaterialRequest extends CreateProductRequest
     public function rules(): array
     {
         return [
-            'name'              => 'required|string|max:255',
+            'name'              => ['required', 'string', 'max:255', new NoHtmlTags()],
             'barcode'           => 'nullable|string|max:100',
             'is_active'         => 'nullable|in:true,false,1,0',
             // Raw Materials are never counted by the piece — weight or volume

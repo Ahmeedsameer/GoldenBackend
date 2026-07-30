@@ -2,6 +2,7 @@
 
 namespace App\Modules\Safe\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreTransactionReasonRequest extends FormRequest
@@ -11,7 +12,7 @@ class StoreTransactionReasonRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name'      => ['required', 'string', 'max:150'],
+            'name'      => ['required', 'string', 'max:150', new NoHtmlTags()],
             'direction' => ['required', 'in:in,out,both'],
         ];
     }

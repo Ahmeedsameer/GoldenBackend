@@ -2,6 +2,7 @@
 
 namespace App\Modules\Stock\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreSupplierPaymentRequest extends FormRequest
@@ -20,7 +21,7 @@ class StoreSupplierPaymentRequest extends FormRequest
             'safe_id'     => 'required|integer|exists:safes,id',
             'currency_id' => 'required|integer|exists:currencies,id',
             'amount'      => 'required|numeric|min:0.01',
-            'note'        => 'nullable|string|max:255',
+            'note'        => ['nullable', 'string', 'max:255', new NoHtmlTags()],
             // Optional — reuses the Payment Methods module (Phase 2). When the chosen
             // method has an assigned safe, it overrides `safe_id` automatically.
             'payment_method_id' => 'nullable|integer|exists:payment_methods,id',

@@ -4,6 +4,7 @@ namespace App\Modules\Sales\Requests;
 
 use App\Models\PaymentMethod;
 use App\Models\Safe;
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -27,8 +28,8 @@ class StoreInvoiceRequest extends FormRequest
         }
 
         return [
-            'name'               => [ 'nullable','string', 'max:255'],
-            'phone'              => [ 'nullable','string', 'max:20'],
+            'name'               => [ 'nullable','string', 'max:255', new NoHtmlTags()],
+            'phone'              => [ 'nullable','string', 'max:20', new NoHtmlTags()],
             'price_type'         => ['required', 'in:wholesale,retail'],
             'safe_id'            => ['nullable', 'integer', 'exists:safes,id'],
 

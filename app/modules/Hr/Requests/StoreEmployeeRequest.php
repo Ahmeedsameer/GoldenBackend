@@ -2,6 +2,7 @@
 
 namespace App\Modules\Hr\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -15,7 +16,7 @@ class StoreEmployeeRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name'                         => ['required', 'string', 'max:255'],
+            'name'                         => ['required', 'string', 'max:255', new NoHtmlTags()],
             'email'                        => ['required', 'email', 'max:255', 'unique:users,email'],
             'password'                     => ['required', 'string', 'min:6'],
             'phone'                        => ['nullable', 'string', 'max:30'],
@@ -26,7 +27,7 @@ class StoreEmployeeRequest extends FormRequest
             'personal_commission_percent'  => ['nullable', 'numeric', 'min:0', 'max:100'],
             'hire_date'                    => ['nullable', 'date'],
             'monthly_leave_allowance'       => ['nullable', 'integer', 'min:0', 'max:365'],
-            'hr_notes'                     => ['nullable', 'string'],
+            'hr_notes'                     => ['nullable', 'string', new NoHtmlTags()],
 
             // Primary (permanent) branch.
             'shop_id'                      => ['required', 'integer', 'exists:shops,id'],

@@ -2,6 +2,7 @@
 
 namespace App\Modules\Safe\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class UpdateSafeTypeRequest extends FormRequest
@@ -11,7 +12,7 @@ class UpdateSafeTypeRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name'      => ['sometimes', 'required', 'string', 'max:100'],
+            'name'      => ['sometimes', 'required', 'string', 'max:100', new NoHtmlTags()],
             'is_active' => ['sometimes', 'required', 'boolean'],
         ];
     }

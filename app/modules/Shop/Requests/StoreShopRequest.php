@@ -2,6 +2,7 @@
 
 namespace App\Modules\Shop\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreShopRequest extends FormRequest
@@ -23,8 +24,8 @@ class StoreShopRequest extends FormRequest
     {
        
         return [
-            'name' => 'required|string|max:255',
-            'address' => 'required|string|max:255',
+            'name' => ['required', 'string', 'max:255', new NoHtmlTags()],
+            'address' => ['required', 'string', 'max:255', new NoHtmlTags()],
             'username' => 'nullable|string|max:255|unique:shops,username',
             'password' => 'nullable|string|min:8',
             'status' => 'required|in:active,inactive',

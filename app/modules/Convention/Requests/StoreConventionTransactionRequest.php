@@ -2,6 +2,7 @@
 
 namespace App\Modules\Convention\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreConventionTransactionRequest extends FormRequest
@@ -13,8 +14,8 @@ class StoreConventionTransactionRequest extends FormRequest
         return [
             'manager_id' => ['required', 'exists:users,id'],
             'amount'     => ['required', 'numeric', 'min:0.01'],
-            'reason'     => ['required', 'string', 'max:255'],
-            'notes'      => ['nullable', 'string', 'max:1000'],
+            'reason'     => ['required', 'string', 'max:255', new NoHtmlTags()],
+            'notes'      => ['nullable', 'string', 'max:1000', new NoHtmlTags()],
         ];
     }
 

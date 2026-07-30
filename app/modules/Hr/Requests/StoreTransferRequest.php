@@ -3,6 +3,7 @@
 namespace App\Modules\Hr\Requests;
 
 use App\Models\User;
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
@@ -21,8 +22,8 @@ class StoreTransferRequest extends FormRequest
             'temporary_branch_id' => ['required', 'integer', 'exists:shops,id'],
             'start_date'          => ['required', 'date'],
             'end_date'            => ['required', 'date', 'after_or_equal:start_date'],
-            'reason'              => ['nullable', 'string'],
-            'notes'               => ['nullable', 'string'],
+            'reason'              => ['nullable', 'string', new NoHtmlTags()],
+            'notes'               => ['nullable', 'string', new NoHtmlTags()],
         ];
     }
 

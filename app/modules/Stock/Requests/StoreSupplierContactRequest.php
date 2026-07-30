@@ -2,6 +2,7 @@
 
 namespace App\Modules\Stock\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreSupplierContactRequest extends FormRequest
@@ -14,10 +15,10 @@ class StoreSupplierContactRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name'     => 'required|string|max:255',
+            'name'     => ['required', 'string', 'max:255', new NoHtmlTags()],
             'phone'    => 'required|string|max:20',
-            'address'  => 'required|string|max:255',
-            'position' => 'nullable|string|max:100',
+            'address'  => ['required', 'string', 'max:255', new NoHtmlTags()],
+            'position' => ['nullable', 'string', 'max:100', new NoHtmlTags()],
         ];
     }
 

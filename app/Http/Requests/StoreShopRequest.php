@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreShopRequest extends FormRequest
@@ -14,9 +15,9 @@ class StoreShopRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name'                 => 'required|string|max:255',
+            'name'                 => ['required', 'string', 'max:255', new NoHtmlTags()],
             'branch_bonus_percent' => 'nullable|numeric|min:0|max:100',
-            'address'              => 'required|string',
+            'address'              => ['required', 'string', new NoHtmlTags()],
             'username'             => 'required|string|min:3|max:255|unique:shops,username',
             'password'             => 'required|string|min:6',
             'status'               => 'sometimes|in:active,inactive',

@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class UpdateShopRequest extends FormRequest
@@ -16,9 +17,9 @@ class UpdateShopRequest extends FormRequest
         $shopId = $this->route('id');
 
         return [
-            'name'                 => 'sometimes|required|string|max:255',
+            'name'                 => ['sometimes', 'required', 'string', 'max:255', new NoHtmlTags()],
             'branch_bonus_percent' => 'nullable|numeric|min:0|max:100',
-            'address'              => 'sometimes|required|string',
+            'address'              => ['sometimes', 'required', 'string', new NoHtmlTags()],
             'username'   => 'sometimes|required|string|min:3|max:255|unique:shops,username,' . $shopId,
             'password'   => 'nullable|string|min:6',
             'status'     => 'sometimes|in:active,inactive',

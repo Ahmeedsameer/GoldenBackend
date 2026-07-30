@@ -2,6 +2,7 @@
 
 namespace App\Modules\Stock\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreSupplierRequest extends FormRequest
@@ -14,15 +15,15 @@ class StoreSupplierRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name'                 => 'required|string|max:255',
+            'name'                 => ['required', 'string', 'max:255', new NoHtmlTags()],
             'phone'                => 'required|string|max:20|unique:suppliers,phone',
-            'address'              => 'required|string|max:255',
-            'bank_account_number'  => 'nullable|string|max:100',
-            'mobile_wallet'        => 'nullable|string|max:100',
-            'instapay'             => 'nullable|string|max:100',
-            'iban'                 => 'nullable|string|max:100',
+            'address'              => ['required', 'string', 'max:255', new NoHtmlTags()],
+            'bank_account_number'  => ['nullable', 'string', 'max:100', new NoHtmlTags()],
+            'mobile_wallet'        => ['nullable', 'string', 'max:100', new NoHtmlTags()],
+            'instapay'             => ['nullable', 'string', 'max:100', new NoHtmlTags()],
+            'iban'                 => ['nullable', 'string', 'max:100', new NoHtmlTags()],
             'opening_balance'      => 'nullable|numeric|min:0',
-            'notes'                => 'nullable|string',
+            'notes'                => ['nullable', 'string', new NoHtmlTags()],
         ];
     }
 

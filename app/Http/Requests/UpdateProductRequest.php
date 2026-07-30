@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use App\Models\Product;
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -24,12 +25,12 @@ class UpdateProductRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name' => 'sometimes|required|string|max:255',
+            'name' => ['sometimes', 'required', 'string', 'max:255', new NoHtmlTags()],
             'image' => 'sometimes|nullable|image|mimes:jpeg,png,jpg,gif,svg|max:2048',
             'sku' => 'sometimes|required|string|max:100|unique:products,sku,' . $this->route('id'),
             'barcode' => 'sometimes|nullable|string|max:100',
-            'description' => 'sometimes|nullable|string',
-            'notes'       => 'sometimes|nullable|string',
+            'description' => ['sometimes', 'nullable', 'string', new NoHtmlTags()],
+            'notes'       => ['sometimes', 'nullable', 'string', new NoHtmlTags()],
             'is_active' => 'sometimes|in:true,false,1,0',
             'scalar' => 'sometimes|required|in:kg,g,l,ml,pcs',
             'category_id' => 'sometimes|required|exists:categories,id',

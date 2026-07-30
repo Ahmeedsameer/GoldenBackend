@@ -25,8 +25,17 @@ class CheckRole
             return $next($request);
         }
 
+        // No valid authenticated user at all (no token / invalid token / expired
+        // token — auth()->check() collapses all three into false, see JWTGuard)
+        // — this is a 401, distinct from "authenticated but wrong role" below.
+        // Does not change any access decision, only which status code an
+        // already-blocked request receives.
+        if (! auth()->check()) {
+            return response()->json(['error' => 'Unauthorized'], 401);
+        }
+
         // Otherwise the user's role must be one of the allowed roles.
-        if (auth()->check() && in_array(auth()->user()->role, $roles, true)) {
+        if (in_array(auth()->user()->role, $roles, true)) {
             return $next($request);
         }
 

@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Rules\NoHtmlTags;
 use Illuminate\Foundation\Http\FormRequest;
 
 class updateCategoryRequest extends FormRequest
@@ -22,8 +23,8 @@ class updateCategoryRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'name'               => 'sometimes|required|string|unique:categories,name,' . $this->route('id'),
-            'description'        => 'nullable|string',
+            'name'               => ['sometimes', 'required', 'string', 'unique:categories,name,' . $this->route('id'), new NoHtmlTags()],
+            'description'        => ['nullable', 'string', new NoHtmlTags()],
             'parent_id'          => 'nullable|exists:categories,id',
             'image'              => 'nullable|image|mimes:jpeg,png,jpg,gif,svg|max:2048',
             'minimum_sell_price' => 'sometimes|required|numeric|min:0',
