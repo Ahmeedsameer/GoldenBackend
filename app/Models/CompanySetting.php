@@ -25,7 +25,7 @@ class CompanySetting extends Model
      */
     public static function current(): self
     {
-        return static::query()->firstOrCreate([], ['name' => 'Alpha Business']);
+        return static::query()->firstOrCreate([], ['name' => 'Golden Perfume']);
     }
 
     public function getLogoUrlAttribute(): ?string

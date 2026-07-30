@@ -15,6 +15,7 @@ class ShopResource extends JsonResource
             'address'         => $this->address,
             'username'        => $this->username,
             'status'          => $this->status,
+            'is_warehouse'    => (bool) $this->is_warehouse,
             'employees_count' => $this->whenCounted('employees'),
             'manager'         => $this->whenLoaded('manager', fn() => [
                 'id'    => $this->manager->id,

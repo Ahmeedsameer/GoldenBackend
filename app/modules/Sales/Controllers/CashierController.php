@@ -129,7 +129,7 @@ class CashierController extends Controller
 
     /**
      * Product Builder live price calculation + bottle-capacity validation.
-     * GET /api/sales/compound-price?catalog_product_id=&oil_product_id=&oil_qty=&bottle_product_id=&alcohol_product_id=&alcohol_qty=
+     * GET /api/sales/compound-price?catalog_product_id=&oil_product_id=&oil_qty=&bottle_product_id=&alcohol_product_id=&alcohol_qty=&quantity=
      */
     public function compoundPrice()
     {
@@ -148,6 +148,9 @@ class CashierController extends Controller
             // quantity suggestion (and product choice) comes after.
             'alcohol_product_id' => ['nullable', 'integer', 'exists:products,id'],
             'alcohol_qty'        => ['nullable', 'numeric', 'min:0.001'],
+            // Manufacturing Quantity — how many identical bottles this operation
+            // produces. Defaults to 1 (unchanged behavior for every existing caller).
+            'quantity'           => ['nullable', 'integer', 'min:1'],
         ]);
 
         $result = $this->salesService->calculateCompoundPrice(
@@ -158,6 +161,7 @@ class CashierController extends Controller
             (int) $data['bottle_product_id'],
             isset($data['alcohol_product_id']) ? (int) $data['alcohol_product_id'] : null,
             isset($data['alcohol_qty']) ? (float) $data['alcohol_qty'] : null,
+            isset($data['quantity']) ? (int) $data['quantity'] : 1,
         );
 
         return response()->json(['message' => 'ok', 'data' => $result]);

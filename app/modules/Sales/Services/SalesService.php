@@ -1037,12 +1037,15 @@ class SalesService
     //    informational only.
     public function calculateCompoundPrice(
         int $shopId, int $catalogProductId, int $oilProductId, float $oilQty, int $bottleProductId,
-        ?int $alcoholProductId = null, ?float $alcoholQty = null,
+        ?int $alcoholProductId = null, ?float $alcoholQty = null, int $quantity = 1,
     ): array {
         $catalog = Product::findOrFail($catalogProductId);
         $oil     = Product::with('category.productType')->findOrFail($oilProductId);
         $bottle  = Product::with('category.productType')->findOrFail($bottleProductId);
 
+        // Bottle capacity is a per-bottle physical constant — validated against the
+        // per-bottle oil quantity regardless of how many identical bottles (Manufacturing
+        // Quantity) are being produced in this operation.
         if ($bottle->capacity_ml !== null && $oilQty > (float) $bottle->capacity_ml) {
             abort(422, 'الكمية المطلوبة من الزيت أكبر من سعة الزجاجة المختارة.');
         }
@@ -1050,8 +1053,10 @@ class SalesService
         $oilUnitPrice    = $this->resolveConfiguredUnitPrice($oil) ?? 0.0;
         $bottleUnitPrice = $this->resolveConfiguredUnitPrice($bottle) ?? 0.0;
 
-        $oilCost    = round($oilQty * $oilUnitPrice, 2);
-        $bottleCost = round($bottleUnitPrice, 2);
+        // Everything below is scaled by Manufacturing Quantity — oilQty/alcoholQty are
+        // PER BOTTLE amounts; oilCost/bottleCost/alcoholCost represent the whole batch.
+        $oilCost    = round($oilQty * $quantity * $oilUnitPrice, 2);
+        $bottleCost = round($bottleUnitPrice * $quantity, 2);
 
         $oilStock = (float) Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $oil->id))
             ->where('shop_id', $shopId)->sum('current_quantity');
@@ -1072,16 +1077,19 @@ class SalesService
         if ($alcoholProductId && $alcoholQty !== null) {
             $alcohol = Product::with('category.productType')->findOrFail($alcoholProductId);
             $alcoholUnitPrice = $this->resolveConfiguredUnitPrice($alcohol) ?? 0.0;
-            $alcoholCost = round($alcoholQty * $alcoholUnitPrice, 2);
+            $alcoholCost = round($alcoholQty * $quantity * $alcoholUnitPrice, 2);
             $alcoholStock = (float) Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $alcohol->id))
                 ->where('shop_id', $shopId)->sum('current_quantity');
         }
 
-        // Deliberately Oil + Bottle only — this is the "commercial" cost/profit basis
-        // shown to the cashier; Alcohol's real cost (above) never enters it.
-        $totalCost = round($oilCost + $bottleCost, 2);
-        $stockOk = $oilStock >= $oilQty && $bottleStock >= 1
-            && (! $alcohol || $alcoholStock >= $alcoholQty);
+        // Oil + Bottle + Alcohol — the full real manufacturing cost of the whole
+        // batch of $quantity bottles, used only for internal stock-check gating
+        // and cost/profit reporting. Alcohol's INVOICE price still stays 0 (it is
+        // never itself charged to the customer — see catalog-sell-dialog's
+        // addToInvoice), but its real cost still counts toward Manufacturing Cost.
+        $totalCost = round($oilCost + $bottleCost + $alcoholCost, 2);
+        $stockOk = $oilStock >= ($oilQty * $quantity) && $bottleStock >= $quantity
+            && (! $alcohol || $alcoholStock >= ($alcoholQty * $quantity));
 
         return [
             'oil_unit_price'    => $oilUnitPrice,

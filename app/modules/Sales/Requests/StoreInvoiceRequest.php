@@ -78,9 +78,10 @@ class StoreInvoiceRequest extends FormRequest
 
     /** A zero-priced line is only ever legitimate for the Alcohol role (an
      *  operational material, never charged to the customer — see
-     *  catalog-sell-dialog's addToInvoice). Any other product sent with an
-     *  explicit price of 0 is rejected here, server-side, regardless of what
-     *  the client sent. */
+     *  catalog-sell-dialog's addToInvoice). Oil and Bottle always keep their
+     *  real configured price, so any other product sent with an explicit
+     *  price of 0 is rejected here, server-side, regardless of what the
+     *  client sent. */
     public function withValidator(\Illuminate\Validation\Validator $validator): void
     {
         $validator->after(function (\Illuminate\Validation\Validator $validator) {

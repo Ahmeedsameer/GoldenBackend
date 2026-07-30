@@ -31,6 +31,7 @@ use App\Modules\Convention\Controllers\NotificationController;
 use App\Modules\Pricing\Controllers\PricingController;
 use App\Modules\BranchOperations\Controllers\TransferRequestController;
 use App\Modules\BranchOperations\Controllers\RequiredMaterialsController;
+use App\Modules\BranchOperations\Controllers\GlobalMaterialStatusController;
 use App\Modules\BranchOperations\Controllers\WasteController;
 use App\Modules\BranchOperations\Controllers\InventoryAdjustmentController;
 use App\Modules\BranchOperations\Controllers\InventoryCountController;
@@ -319,6 +320,15 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
     // endpoint is in the manager-role group below) ──────────────────────────────
     Route::group(['prefix' => 'admin/reports/required-materials'], function () {
         Route::get('', [RequiredMaterialsController::class, 'report']);
+    });
+
+    // ── Global Branch Material Status — admin, cross-branch (By Branch / By Material) ──
+    Route::group(['prefix' => 'admin/inventory/branch-material-status'], function () {
+        Route::get('by-branch',   [GlobalMaterialStatusController::class, 'byBranch']);
+        Route::get('by-material', [GlobalMaterialStatusController::class, 'byMaterial']);
+    });
+    Route::group(['prefix' => 'admin/reports/branch-material-status'], function () {
+        Route::get('', [GlobalMaterialStatusController::class, 'report']);
     });
 
     // ── Stock Intelligence (admin: cross-shop) ───────────────────────────────────
