@@ -3,94 +3,64 @@
 namespace App\Modules\Sales\Controllers;
 
 use App\Http\Controllers\Controller;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Str;
+use App\Models\Invoice;
+use App\Modules\Sales\Requests\UpdateInvoiceStatusRequest;
+use App\Modules\Sales\Services\SalesService;
 
+/**
+ * Manager review of pending invoices for their OWN shop only — the same
+ * "sold below category minimum" queue the Admin reviews shop-wide under
+ * /admin/invoices, just scoped to the manager's branch. This replaces the
+ * older cache-based per-line override-request flow, which only ever fired
+ * under the legacy "Manual Total" pricing mode and is effectively dead under
+ * today's default per-item pricing engine (see SalesService::createInvoice()
+ * — a below-minimum sale is saved straight to the invoices table with
+ * status='pending', not to cache).
+ */
 class ManagerOverrideController extends Controller
 {
+    public function __construct(private SalesService $salesService) {}
+
     /**
      * GET /api/manager/override-requests
-     * Lists all override requests for the manager's shop (pending or recent).
+     * Lists pending invoices for the manager's own shop only — shop_id is
+     * always taken from the authenticated manager, never from the client.
      */
     public function index()
     {
-        $manager  = auth()->user();
-        $indexKey = "override_index:{$manager->shop_id}";
-        $index    = Cache::get($indexKey, []);
+        $manager = auth()->user();
 
-        $requests = [];
-        foreach ($index as $id) {
-            $entry = Cache::get("override_request:{$id}");
-            if ($entry && (int) $entry['shop_id'] === $manager->shop_id) {
-                $requests[] = $entry;
-            }
-        }
-
-        // Sort: pending first, then by creation time descending
-        usort($requests, function ($a, $b) {
-            if ($a['status'] === 'pending' && $b['status'] !== 'pending') return -1;
-            if ($b['status'] === 'pending' && $a['status'] !== 'pending') return  1;
-            return strcmp($b['created_at'], $a['created_at']);
-        });
+        $invoices = $this->salesService->getInvoicesForAdmin([
+            'status'  => 'pending',
+            'shop_id' => $manager->shop_id,
+        ], request()->integer('per_page', 15));
 
         return response()->json([
-            'message' => 'تم جلب طلبات الموافقة بنجاح',
-            'data'    => array_values($requests),
+            'message' => 'تم جلب الفواتير المعلّقة بنجاح',
+            'data'    => $invoices,
         ]);
     }
 
     /**
      * PUT /api/manager/override-requests/{id}
-     * Manager approves or rejects an override request.
-     * On approval a short-lived one-time token is generated for the seller.
+     * Manager approves or rejects a pending invoice from their OWN shop only.
      */
-    public function respond(string $id)
+    public function respond(UpdateInvoiceStatusRequest $request, string $id)
     {
         $manager = auth()->user();
+        $invoice = Invoice::findOrFail($id);
 
-        $validated = request()->validate([
-            'action' => ['required', 'in:approved,rejected'],
-            'note'   => ['nullable', 'string', 'max:300'],
+        if ((int) $invoice->shop_id !== (int) $manager->shop_id) {
+            return response()->json(['message' => 'غير مصرح لك بإدارة فاتورة من فرع آخر'], 403);
+        }
+
+        $updated = $this->salesService->updateStatus($invoice, $request->validated('status'));
+
+        $label = $updated->status === 'approved' ? 'اعتماد' : 'رفض';
+
+        return response()->json([
+            'message' => "تم {$label} الفاتورة بنجاح",
+            'data'    => $updated,
         ]);
-
-        $entry = Cache::get("override_request:{$id}");
-
-        if (! $entry) {
-            return response()->json(['message' => 'الطلب غير موجود أو انتهت صلاحيته'], 404);
-        }
-
-        if ((int) $entry['shop_id'] !== $manager->shop_id) {
-            return response()->json(['message' => 'غير مصرح لك بإدارة هذا الطلب'], 403);
-        }
-
-        if ($entry['status'] !== 'pending') {
-            return response()->json(['message' => 'تم البت في هذا الطلب مسبقاً'], 422);
-        }
-
-        $token = null;
-
-        if ($validated['action'] === 'approved') {
-            // Create a separate one-time token for the seller to include in the invoice POST
-            $token = (string) Str::uuid();
-            Cache::put("override_token:{$token}", [
-                'seller_id'   => (int) $entry['seller_id'],
-                'shop_id'     => (int) $entry['shop_id'],
-                'approved_by' => $manager->id,
-            ], now()->addMinutes(15));
-        }
-
-        $entry['status']       = $validated['action'];
-        $entry['manager_id']   = $manager->id;
-        $entry['manager_note'] = $validated['note'] ?? null;
-        $entry['token']        = $token;
-
-        // Persist the updated request so the seller's polling can read it
-        Cache::put("override_request:{$id}", $entry, now()->addMinutes(30));
-
-        $message = $validated['action'] === 'approved'
-            ? 'تمت الموافقة على طلب البيع'
-            : 'تم رفض طلب البيع';
-
-        return response()->json(['message' => $message]);
     }
 }

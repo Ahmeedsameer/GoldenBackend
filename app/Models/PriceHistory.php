@@ -10,11 +10,14 @@ class PriceHistory extends Model
 {
     use HasFactory;
 
-    public const TYPE_COST_UPDATE = 'cost_update';
-    public const TYPE_PRICE_EDIT  = 'price_edit';
+    public const TYPE_COST_UPDATE  = 'cost_update';
+    public const TYPE_PRICE_EDIT   = 'price_edit';
+    /** A single Supply Batch (SupplyItem) received its (immutable, one-time) selling price. */
+    public const TYPE_BATCH_PRICING = 'batch_pricing';
 
     protected $fillable = [
         'product_id',
+        'supply_item_id',
         'old_cost',
         'new_cost',
         'old_selling_price',
@@ -34,6 +37,11 @@ class PriceHistory extends Model
     public function product(): BelongsTo
     {
         return $this->belongsTo(Product::class);
+    }
+
+    public function supplyItem(): BelongsTo
+    {
+        return $this->belongsTo(SupplyItem::class);
     }
 
     public function updatedBy(): BelongsTo

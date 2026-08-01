@@ -3,8 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Http\Requests\StoreUserRequest;
+use App\Http\Requests\UpdateOwnProfileRequest;
+use App\Http\Requests\ChangeOwnPasswordRequest;
+use App\Http\Requests\AdminResetUserPasswordRequest;
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Hash;
 use App\Http\Services\UserManagmentService;
 
 class UsersManagmentController extends Controller
@@ -76,11 +80,59 @@ class UsersManagmentController extends Controller
      */
     public function show(string $id)
     {
-        $user = User::find($id);
+        $user = User::with('shop')->find($id);
         if (!$user) {
             return response()->json(['message' => 'لم يتم ايجاد المستخدم'], 404);
         }
         return response()->json($user);
+    }
+
+    /**
+     * Update the AUTHENTICATED admin's own profile (name/email/phone only).
+     * Always scoped to auth()->id() — there is no way to pass another user's
+     * ID into this endpoint, so it can never edit someone else's account.
+     */
+    public function updateProfile(UpdateOwnProfileRequest $request)
+    {
+        $user = auth()->user();
+        $user->update($request->validated());
+
+        return response()->json([
+            'message' => 'تم تحديث الملف الشخصي بنجاح',
+            'user'    => $user->fresh('shop'),
+        ]);
+    }
+
+    /**
+     * Change the AUTHENTICATED admin's own password. Requires the current
+     * password (verified server-side against the existing hash — never
+     * exposed to the client) plus a new password + confirmation.
+     */
+    public function changePassword(ChangeOwnPasswordRequest $request)
+    {
+        $user = auth()->user();
+        $user->password = Hash::make($request->validated('new_password'));
+        $user->save();
+
+        return response()->json(['message' => 'تم تغيير كلمة المرور بنجاح']);
+    }
+
+    /**
+     * Admin-only: reset another user's password. The admin supplies only a
+     * brand new password — the target user's existing password/hash is never
+     * read, returned, or displayed anywhere.
+     */
+    public function resetPassword(AdminResetUserPasswordRequest $request, string $id)
+    {
+        $user = User::find($id);
+        if (!$user) {
+            return response()->json(['message' => 'لم يتم ايجاد المستخدم'], 404);
+        }
+
+        $user->password = Hash::make($request->validated('new_password'));
+        $user->save();
+
+        return response()->json(['message' => 'تم إعادة تعيين كلمة المرور بنجاح']);
     }
 
     /**

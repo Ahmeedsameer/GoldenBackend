@@ -2,6 +2,7 @@
 
 namespace App\Modules\Pricing\Services;
 
+use App\Models\Goods;
 use App\Models\PriceHistory;
 use App\Models\Product;
 use App\Models\Supply;
@@ -69,7 +70,7 @@ class PricingService
             ->with('category.productType:id,pricing_source')
             ->search($search)
             ->orderBy('name')
-            ->get(['id', 'name', 'sku', 'scalar', 'product_type', 'category_id', 'selling_price', 'price_per_gram', 'default_selling_price', 'priced_cost', 'priced_at']);
+            ->get(['id', 'name', 'sku', 'scalar', 'product_type', 'category_id', 'selling_price', 'price_per_gram', 'default_selling_price', 'priced_cost', 'priced_at', 'is_active']);
 
         return $products->map(fn (Product $p) => $this->rowFor($p))->values()->all();
     }
@@ -86,6 +87,15 @@ class PricingService
 
     public function rowFor(Product $product): array
     {
+        // Batch-aware pricing (Ready Products, Packaging, and any future
+        // inventory item priced per-batch — Product::isBatchPriced()): a flat
+        // `selling_price`/`status` no longer means anything — every purchase
+        // batch (SupplyItem) carries its own immutable price. See
+        // batchRowFor()/batchStatusFor()/listBatches().
+        if ($product->isBatchPriced()) {
+            return $this->batchRowFor($product);
+        }
+
         if ($product->product_type === Product::TYPE_COMPOUND) {
             $price = $product->default_selling_price !== null ? (float) $product->default_selling_price : null;
 
@@ -136,6 +146,212 @@ class PricingService
         ];
     }
 
+    // ── Batch-aware pricing (Ready Products, Packaging, any future inventory
+    //    item priced per-batch) — every purchase batch (SupplyItem) carries its
+    //    OWN immutable selling_price. Automatic status flow:
+    //    Product Created → Waiting For First Supply → (first supply arrives)
+    //    → Needs Initial Pricing → (priced) → Priced → (new supply arrives)
+    //    → Pricing Update Required → (new batch priced) → Priced. ───────────
+
+    /** Product-level batch summary: status, batch counts, latest supply/pricing dates. */
+    public function batchStatusFor(Product $product): array
+    {
+        $batches = $product->supplyItems; // hasMany, ordered oldest-first
+        $total    = $batches->count();
+        // Archived batches are retired — they don't count toward "needs
+        // pricing" (no point nagging about a batch that will never sell
+        // again), but they DO still count in batches_total for an honest
+        // history count.
+        $active   = $batches->whereNull('archived_at');
+        $priced   = $active->whereNotNull('selling_price')->count();
+        $unpriced = $active->count() - $priced;
+
+        if (! $product->is_active) {
+            $status = 'inactive';
+        } elseif ($total === 0) {
+            $status = 'waiting_for_first_supply';
+        } elseif ($priced === 0 && $unpriced > 0) {
+            $status = 'needs_initial_pricing';
+        } elseif ($unpriced > 0) {
+            $status = 'pricing_update_required';
+        } else {
+            $status = 'priced';
+        }
+
+        return [
+            'status'              => $status,
+            'batches_total'       => $total,
+            'batches_priced'      => $priced,
+            'batches_unpriced'    => $unpriced,
+            'needs_pricing'       => $unpriced > 0,
+            'latest_supply_date'  => $batches->max('supply_date'),
+            'latest_pricing_date' => optional($batches->pluck('priced_at')->filter()->max())?->toIso8601String(),
+        ];
+    }
+
+    /**
+     * Every batch for this product, oldest-first, with its own remaining
+     * quantity (summed across every shop's Goods rows) plus the three figures
+     * a manager needs to know what customers pay today vs. what kicks in
+     * next: current_fifo_price (oldest priced batch that still has stock),
+     * next_batch_price (the very next batch in line, priced or not — so an
+     * unpriced arrival is immediately visible), remaining_in_current_batch.
+     */
+    public function listBatches(Product $product): array
+    {
+        // Ordered exactly like real FIFO consumption (see Product::supplyItems()
+        // docblock) — by the parent Supply's date/id, not SupplyItem.created_at.
+        $batches = SupplyItem::where('supply_items.product_id', $product->id)
+            ->join('supplies', 'supplies.id', '=', 'supply_items.supply_id')
+            ->with(['supply:id,date', 'pricedBy:id,name'])
+            ->orderBy('supplies.date')
+            ->orderBy('supply_items.id')
+            ->select('supply_items.*')
+            ->get();
+
+        $remainingByBatch = $batches->isEmpty() ? collect() : Goods::whereIn('supply_item_id', $batches->pluck('id'))
+            ->selectRaw('supply_item_id, SUM(current_quantity) as remaining')
+            ->groupBy('supply_item_id')
+            ->pluck('remaining', 'supply_item_id');
+
+        $rows = $batches->map(function (SupplyItem $b) use ($remainingByBatch) {
+            $remaining = (float) ($remainingByBatch[$b->id] ?? 0);
+
+            return [
+                'id'                 => $b->id,
+                'supply_date'        => $b->supply?->date,
+                'purchase_cost'      => (float) $b->unit_price,
+                'selling_price'      => $b->selling_price !== null ? (float) $b->selling_price : null,
+                'quantity_received'  => (float) $b->quantity,
+                'remaining_quantity' => $remaining,
+                'is_priced'          => $b->isPriced(),
+                'is_archived'        => $b->isArchived(),
+                'priced_at'          => $b->priced_at?->toIso8601String(),
+                'priced_by'          => $b->pricedBy?->name,
+                // Placeholder — replaced below once we know which single batch
+                // is actually the one FIFO is currently drawing from.
+                'status'             => ! $b->isPriced() ? 'waiting_for_pricing' : 'queued',
+            ];
+        })->values();
+
+        // Exactly ONE batch is ever "active" — the oldest priced, non-archived
+        // batch that still has stock (what fifoBatchesQuery()/processItem()
+        // would drain from next). Every other priced batch with stock is
+        // merely "queued" (in stock, waiting its turn); a priced batch with
+        // none left is "depleted". An archived batch is always "archived" —
+        // permanently retired from sale, regardless of remaining stock —
+        // never deleted, so it's still fully visible in this history.
+        $activeIdx = $rows->search(fn ($r) => $r['is_priced'] && ! $r['is_archived'] && $r['remaining_quantity'] > 0);
+        $active    = $activeIdx !== false ? $rows[$activeIdx] : null;
+
+        $rows = $rows->map(function ($r, $i) use ($activeIdx) {
+            if ($r['is_archived']) {
+                $r['status'] = 'archived';
+                return $r;
+            }
+            if (! $r['is_priced']) {
+                return $r;
+            }
+            $r['status'] = $i === $activeIdx ? 'active' : ($r['remaining_quantity'] > 0 ? 'queued' : 'depleted');
+            return $r;
+        });
+
+        $next = $active
+            ? $rows->slice($activeIdx + 1)->first(fn ($r) => ! $r['is_archived'] && $r['remaining_quantity'] > 0)
+            : $rows->first(fn ($r) => ! $r['is_archived'] && $r['remaining_quantity'] > 0);
+
+        return [
+            'batches'                     => $rows->all(),
+            'current_fifo_price'          => $active['selling_price'] ?? null,
+            'next_batch_price'            => $next['selling_price'] ?? null,
+            'remaining_in_current_batch'  => $active['remaining_quantity'] ?? null,
+        ];
+    }
+
+    private function batchRowFor(Product $product): array
+    {
+        $status       = $this->batchStatusFor($product);
+        $batchSummary = $this->listBatches($product);
+        $currentStock = (float) Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $product->id))
+            ->sum('current_quantity');
+
+        return [
+            'id' => $product->id, 'name' => $product->name, 'sku' => $product->sku,
+            'product_type' => $product->product_type,
+            'pricing_field' => 'batch',
+            'unit' => $product->scalar,
+            'current_inventory' => $currentStock,
+            'current_fifo_price' => $batchSummary['current_fifo_price'],
+            'next_batch_price' => $batchSummary['next_batch_price'],
+            'remaining_in_current_batch' => $batchSummary['remaining_in_current_batch'],
+            'batches_total' => $status['batches_total'],
+            'batches_priced' => $status['batches_priced'],
+            'batches_unpriced' => $status['batches_unpriced'],
+            'needs_pricing' => $status['needs_pricing'],
+            'latest_supply_date' => $status['latest_supply_date'],
+            'latest_pricing_date' => $status['latest_pricing_date'],
+            'status' => $status['status'],
+        ];
+    }
+
+    /**
+     * Prices exactly ONE unpriced batch — immutable once set (422 if already
+     * priced; historical batches/prices never change, per the architecture's
+     * core guarantee). Writes the batch's selling_price/priced_at/priced_by
+     * and a matching PriceHistory audit row.
+     */
+    public function priceBatch(Product $product, SupplyItem $batch, float $price, ?string $reason, User $admin): void
+    {
+        if ((int) $batch->product_id !== $product->id) {
+            abort(404, 'الدفعة غير تابعة لهذا المنتج.');
+        }
+        if (! $product->isBatchPriced()) {
+            abort(422, 'هذا المنتج لا يُسعَّر بالدفعة — استخدم تعديل سعر البيع العادي.');
+        }
+        if ($batch->isPriced()) {
+            abort(422, 'هذه الدفعة مُسعَّرة بالفعل — الأسعار التاريخية لا يمكن تعديلها أبداً.');
+        }
+
+        DB::transaction(function () use ($product, $batch, $price, $reason, $admin) {
+            $batch->update([
+                'selling_price' => round($price, 2),
+                'priced_at'     => now(),
+                'priced_by'     => $admin->id,
+            ]);
+
+            PriceHistory::create([
+                'product_id'        => $product->id,
+                'supply_item_id'    => $batch->id,
+                'old_selling_price' => null,
+                'new_selling_price' => round($price, 2),
+                'type'              => PriceHistory::TYPE_BATCH_PRICING,
+                'reason'            => $reason,
+                'updated_by'        => $admin->id,
+            ]);
+        });
+    }
+
+    /**
+     * Retires a batch from future sale — Batch Deletion Protection: a batch
+     * that already appears in invoice history can NEVER be physically
+     * deleted (see SupplyService::delete() + the invoice_items FK's
+     * restrictOnDelete), so archiving is the only supported way to "remove"
+     * a batch a manager no longer wants sold. It stays fully visible/
+     * resolvable in Pricing history and on every past invoice forever;
+     * fifoBatchesQuery() simply never drains it again.
+     */
+    public function archiveBatch(Product $product, SupplyItem $batch): void
+    {
+        if ((int) $batch->product_id !== $product->id) {
+            abort(404, 'الدفعة غير تابعة لهذا المنتج.');
+        }
+        if ($batch->isArchived()) {
+            abort(422, 'هذه الدفعة مؤرشفة بالفعل.');
+        }
+
+        $batch->update(['archived_at' => now()]);
+    }
+
     // ── "Update Prices" — Ready Products only, admin-triggered, cost-only ────
 
     /** Products whose live purchase cost differs from the cost Pricing is currently using. */
@@ -143,10 +359,17 @@ class PricingService
     {
         $products = Product::query()
             ->where('product_type', Product::TYPE_READY_PRODUCT)
-            ->get(['id', 'name', 'sku', 'selling_price', 'priced_cost']);
+            ->with('category.productType:id,pricing_source')
+            ->get(['id', 'name', 'sku', 'selling_price', 'priced_cost', 'category_id']);
 
         $changes = [];
         foreach ($products as $product) {
+            // Batch-aware pricing has its own per-batch cost (SupplyItem.unit_price)
+            // and never a single product-level priced_cost/selling_price snapshot —
+            // this legacy cost-refresh flow no longer applies to it at all.
+            if ($product->isBatchPriced()) {
+                continue;
+            }
             $liveCost   = $this->latestPurchaseCost($product->id);
             if ($liveCost === null) {
                 continue; // never purchased — nothing to compare against
@@ -216,6 +439,10 @@ class PricingService
             abort(422, 'هذا المنتج غير قابل للتسعير من هنا.');
         }
 
+        if ($product->isBatchPriced()) {
+            abort(422, 'هذا المنتج يُسعَّر لكل دفعة توريد على حدة — استخدم شاشة تسعير الدُفعات بدلاً من تعديل سعر واحد للمنتج بالكامل.');
+        }
+
         $isCompound = $product->product_type === Product::TYPE_COMPOUND;
         $pricedByGram = ! $isCompound && $this->isPricedByGram($product);
         $field = $isCompound ? 'default_selling_price' : ($pricedByGram ? 'price_per_gram' : 'selling_price');
@@ -241,6 +468,12 @@ class PricingService
     public function detailFor(Product $product): array
     {
         $row = $this->rowFor($product);
+
+        if ($product->isBatchPriced()) {
+            $row['batches'] = $this->listBatches($product)['batches'];
+            return $row;
+        }
+
         $row['latest_purchase_price'] = $this->latestPurchaseCost($product->id);
         $row['average_purchase_price'] = $this->averagePurchaseCost($product->id);
 

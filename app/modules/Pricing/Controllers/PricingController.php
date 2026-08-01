@@ -4,6 +4,7 @@ namespace App\Modules\Pricing\Controllers;
 
 use App\Http\Controllers\Controller;
 use App\Models\Product;
+use App\Models\SupplyItem;
 use App\Modules\Pricing\Services\PricingService;
 use App\Services\Reports\ReportExportService;
 use Illuminate\Http\Request;
@@ -98,6 +99,57 @@ class PricingController extends Controller
         return response()->json([
             'message' => count($changes) . ' منتج تم تحديث تكلفته',
             'data' => $changes,
+        ]);
+    }
+
+    /** GET /api/pricing/{id}/batches — admin + manager. Every batch for this
+     *  product plus current_fifo_price/next_batch_price/remaining_in_current_batch. */
+    public function batches(int $id)
+    {
+        $product = Product::findOrFail($id);
+
+        return response()->json([
+            'message' => 'ok',
+            'data' => array_merge(
+                $this->pricingService->listBatches($product),
+                $this->pricingService->batchStatusFor($product),
+            ),
+        ]);
+    }
+
+    /** PUT /api/pricing/{id}/batches/{supplyItemId}/price — admin only.
+     *  Prices exactly ONE unpriced batch — immutable, 422 if already priced. */
+    public function priceBatch(int $id, int $supplyItemId, Request $request)
+    {
+        $data = $request->validate([
+            'selling_price' => 'required|numeric|min:0.01',
+            'reason' => 'nullable|string|max:255',
+        ]);
+
+        $product = Product::findOrFail($id);
+        $batch = SupplyItem::findOrFail($supplyItemId);
+
+        $this->pricingService->priceBatch($product, $batch, (float) $data['selling_price'], $data['reason'] ?? null, auth()->user());
+
+        return response()->json([
+            'message' => 'تم تسعير الدفعة بنجاح',
+            'data' => $this->pricingService->detailFor($product->fresh()),
+        ]);
+    }
+
+    /** POST /api/pricing/{id}/batches/{supplyItemId}/archive — admin only.
+     *  Retires a batch from future sale — never a physical delete; see
+     *  PricingService::archiveBatch() / Batch Deletion Protection. */
+    public function archiveBatch(int $id, int $supplyItemId)
+    {
+        $product = Product::findOrFail($id);
+        $batch = SupplyItem::findOrFail($supplyItemId);
+
+        $this->pricingService->archiveBatch($product, $batch);
+
+        return response()->json([
+            'message' => 'تمت أرشفة الدفعة بنجاح',
+            'data' => $this->pricingService->detailFor($product->fresh()),
         ]);
     }
 

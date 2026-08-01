@@ -19,7 +19,7 @@ class StoreEmployeeRequest extends FormRequest
             'name'                         => ['required', 'string', 'max:255', new NoHtmlTags()],
             'email'                        => ['required', 'email', 'max:255', 'unique:users,email'],
             'password'                     => ['required', 'string', 'min:6'],
-            'phone'                        => ['nullable', 'string', 'max:30'],
+            'phone'                        => ['nullable', 'string', 'max:30', 'unique:users,phone'],
             // Employees may only be Branch Manager or Sales (never admin).
             'role'                         => ['required', Rule::in(['manager', 'sales'])],
             'status'                       => ['nullable', Rule::in(['active', 'inactive'])],
@@ -31,6 +31,13 @@ class StoreEmployeeRequest extends FormRequest
 
             // Primary (permanent) branch.
             'shop_id'                      => ['required', 'integer', 'exists:shops,id'],
+        ];
+    }
+
+    public function messages()
+    {
+        return [
+            'phone.unique' => 'رقم الهاتف مستخدم بالفعل',
         ];
     }
 }

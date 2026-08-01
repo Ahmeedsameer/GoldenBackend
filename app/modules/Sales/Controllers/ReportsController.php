@@ -225,30 +225,53 @@ class ReportsController extends Controller
         $shopId      = Auth::user()->shop_id;
         [$from, $to] = $this->parseDates($request);
 
-        $rows = InvoiceItem::from('invoice_items')
-            ->join('invoices',  'invoice_items.invoice_id',  '=', 'invoices.id')
-            ->join('products',  'invoice_items.product_id',  '=', 'products.id')
+        // Historical revenue report — must never depend on the product's
+        // CURRENT name (a rename would silently reattribute past revenue to
+        // the new name). Grouped by product_id (stable identity) but labeled
+        // using each invoice_items row's own frozen product_name snapshot —
+        // never a join to the live products table.
+        $base = InvoiceItem::from('invoice_items')
+            ->join('invoices', 'invoice_items.invoice_id', '=', 'invoices.id')
             ->where('invoices.shop_id', $shopId)
-            ->where('invoices.status',  'approved')
-            ->whereBetween('invoices.date', [$from, $to])
+            ->where('invoices.status', 'approved')
+            ->whereBetween('invoices.date', [$from, $to]);
+
+        $rows = (clone $base)
             ->selectRaw('
-                products.id     as product_id,
-                products.name   as product_name,
-                products.scalar as scalar,
+                invoice_items.product_id as product_id,
                 COALESCE(SUM(invoice_items.quantity), 0)                       as total_qty,
                 COALESCE(SUM(invoice_items.quantity * invoice_items.price), 0) as total_revenue
             ')
-            ->groupBy('invoice_items.product_id', 'products.id', 'products.name', 'products.scalar')
+            ->groupBy('invoice_items.product_id')
             ->orderByDesc('total_revenue')
             ->limit(15)
-            ->get()
-            ->map(fn ($r) => [
-                'product_id'    => $r->product_id,
-                'product_name'  => $r->product_name,
-                'scalar'        => $r->scalar,
-                'total_qty'     => round((float) $r->total_qty,     3),
-                'total_revenue' => round((float) $r->total_revenue, 2),
-            ]);
+            ->get();
+
+        $productIds = $rows->pluck('product_id');
+
+        // The most recent snapshot name within this same period/shop for each
+        // product — reflects what the product was actually called during the
+        // reported sales, not what it might be renamed to afterward.
+        $latestSnapshots = (clone $base)
+            ->whereIn('invoice_items.product_id', $productIds)
+            ->orderByDesc('invoices.date')
+            ->orderByDesc('invoice_items.id')
+            ->get(['invoice_items.product_id', 'invoice_items.product_name'])
+            ->unique('product_id')
+            ->keyBy('product_id');
+
+        // Unit label only (e.g. "g"/"pcs") — not an identity field, so the
+        // live product is fine here; falls back to '—' if the product no
+        // longer resolves at all.
+        $scalars = \App\Models\Product::whereIn('id', $productIds)->pluck('scalar', 'id');
+
+        $rows = $rows->map(fn ($r) => [
+            'product_id'    => $r->product_id,
+            'product_name'  => $latestSnapshots[$r->product_id]->product_name ?? '—',
+            'scalar'        => $scalars[$r->product_id] ?? null,
+            'total_qty'     => round((float) $r->total_qty,     3),
+            'total_revenue' => round((float) $r->total_revenue, 2),
+        ]);
 
         return response()->json(['message' => 'ok', 'data' => $rows]);
     }

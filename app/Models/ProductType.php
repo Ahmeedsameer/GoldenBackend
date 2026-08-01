@@ -15,6 +15,10 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  */
 class ProductType extends Model
 {
+    /** Priced per-product (flat unit price) vs per-category-by-weight ('category', e.g. oils). */
+    public const PRICING_SOURCE_PRODUCT  = 'product';
+    public const PRICING_SOURCE_CATEGORY = 'category';
+
     protected $fillable = [
         'code',
         'name',

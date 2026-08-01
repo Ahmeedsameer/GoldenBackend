@@ -95,7 +95,7 @@ class SalesService
             //   configured_unit_price → oil: category price/gram, non-oil: product
             //   selling_price (null when unconfigured → cashier uses Global Total).
             $type = optional($product?->category)->productType;
-            $g->setAttribute('configured_unit_price', $product ? $this->resolveConfiguredUnitPrice($product) : null);
+            $g->setAttribute('configured_unit_price', $product ? $this->resolveConfiguredUnitPrice($product, $shopId) : null);
             $g->setAttribute('sells_by', $type->sold_by ?? 'unit');
             $g->setAttribute('pricing_source', $type->pricing_source ?? null);
             // Selling unit is defined by the Product Type (g / pcs), else the product's own scalar.
@@ -244,7 +244,16 @@ class SalesService
             }
 
             // ── 2. Load products with full category data ──────────────────────
-            $productIds = array_column($data['items'], 'product_id');
+            // Also include every parent_product_id (the catalog product a
+            // composed oil/bottle/alcohol line was sold under) so
+            // processItem() can freeze its name into the group's snapshot
+            // too — a composed line's own product_id is the oil/bottle/
+            // alcohol, never the catalog parent, so the parent would
+            // otherwise never be loaded here at all.
+            $productIds = array_unique(array_merge(
+                array_column($data['items'], 'product_id'),
+                array_filter(array_column($data['items'], 'parent_product_id')),
+            ));
             $products   = Product::with([
                     'category:id,name,minimum_sell_price,price_per_gram,is_fixed,value_percentage,product_type_id',
                     'category.productType:id,is_fixed,sold_by,pricing_source',
@@ -253,27 +262,20 @@ class SalesService
                 ->get()
                 ->keyBy('id');
 
-            // ── 2a. Pricing guard — a Ready Product that has been purchased
-            //     must have a selling price configured in Pricing Management
-            //     before it can be sold; Purchasing/Supply never sets this.
-            //     Compound Products are exempt (price entered fresh every
-            //     sale in the Product Builder), as are oil/bottle
-            //     sub-component lines (role !== null) whose price comes from
-            //     the Builder's own reference cost, not a stored price. ────
-            foreach ($data['items'] as $item) {
-                if (! empty($item['role'])) {
-                    continue;
-                }
-                $product = $products[$item['product_id']] ?? null;
-                if ($product && $product->product_type === Product::TYPE_READY_PRODUCT && $product->selling_price === null) {
-                    abort(422, "المنتج \"{$product->name}\" ليس له سعر بيع محدد — يجب إكمال إدارة الأسعار أولاً.");
-                }
-            }
-
-            // ── 2b. Stock guard — never sell more than what is in this shop ──
-            // Sum the requested quantity per product (an item may span rows),
-            // then compare against the available shop stock. Out-of-stock and
-            // over-sell are both rejected before any deduction. FIFO untouched.
+            // ── 2. Stock guard — never sell more than what is in this shop ───
+            // For batch-priced products (Ready Products, Packaging, and any
+            // future inventory item priced per-batch — Product::isBatchPriced()),
+            // an unpriced batch is structurally invisible to FIFO: it never
+            // counts as "available" and is never drained, so a newly-arrived-
+            // but-not-yet-priced supply can never interrupt sales of the
+            // still-priced older stock, and can never be sold before a manager
+            // assigns it a price in Pricing Management. Sum the requested
+            // quantity per product (an item may span rows), then compare
+            // against the available (priced-only, where applicable) shop
+            // stock. Out-of-stock and over-sell are both rejected before any
+            // deduction. Role sub-lines (compound oil/bottle components) are
+            // real inventory draws too and remain fully covered here — only
+            // their PRICE (not their stock) comes from the Builder.
             $requestedByProduct = [];
             foreach ($data['items'] as $item) {
                 $pid = (int) $item['product_id'];
@@ -281,21 +283,28 @@ class SalesService
             }
 
             foreach ($requestedByProduct as $pid => $requested) {
-                $available = (float) Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $pid))
-                    ->where('shop_id', $activeShopId)
-                    ->sum('current_quantity');
+                $product     = $products[$pid] ?? null;
+                $batchPriced = $product?->isBatchPriced() ?? false;
 
-                $name = $products[$pid]->name ?? "#{$pid}";
-                $unit = $products[$pid]->scalar ?? '';
+                $available = (float) $this->fifoBatchesQuery($pid, $activeShopId, $batchPriced)->sum('current_quantity');
+
+                $name = $product->name ?? "#{$pid}";
+                $unit = $product->scalar ?? '';
 
                 if ($available <= 0) {
-                    abort(422, "المنتج \"{$name}\" نفد من المخزون في هذا الفرع ولا يمكن بيعه.");
+                    $message = $batchPriced
+                        ? "المنتج \"{$name}\" لا توجد له دفعة مُسعَّرة بها مخزون في هذا الفرع — يجب تسعير الدفعة الجديدة من إدارة الأسعار أولاً."
+                        : "المنتج \"{$name}\" نفد من المخزون في هذا الفرع ولا يمكن بيعه.";
+                    abort(422, $message);
                 }
 
                 if ($requested > $available) {
                     $reqTxt = rtrim(rtrim(number_format($requested, 3, '.', ''), '0'), '.');
                     $availTxt = rtrim(rtrim(number_format($available, 3, '.', ''), '0'), '.');
-                    abort(422, "الكمية المطلوبة من \"{$name}\" ({$reqTxt} {$unit}) أكبر من المتاح في المخزون ({$availTxt} {$unit}). لا يمكن إتمام البيع.");
+                    $message = $batchPriced
+                        ? "الكمية المطلوبة من \"{$name}\" ({$reqTxt} {$unit}) أكبر من المتاح في الدفعات المُسعَّرة ({$availTxt} {$unit}). قد تحتاج الدفعة الجديدة إلى تسعير أولاً."
+                        : "الكمية المطلوبة من \"{$name}\" ({$reqTxt} {$unit}) أكبر من المتاح في المخزون ({$availTxt} {$unit}). لا يمكن إتمام البيع.";
+                    abort(422, $message);
                 }
             }
 
@@ -304,7 +313,7 @@ class SalesService
             // price/gram, non-oil → product selling_price); otherwise fall back
             // to the legacy global-total distribution. $effectiveTotal is the
             // authoritative invoice total from here on.
-            [$items, $effectiveTotal] = $this->priceInvoiceItems($data, $products);
+            [$items, $effectiveTotal] = $this->priceInvoiceItems($data, $products, $activeShopId);
 
             // ── 4. Validate payment total against the invoice total (physical safe) ─
             if (! empty($data['payments'])) {
@@ -362,7 +371,7 @@ class SalesService
 
             // ── 7. Process each item — FIFO batch splitting + deduction ───────
             foreach ($items as $item) {
-                $this->processItem($invoice, $item);
+                $this->processItem($invoice, $item, $products);
             }
 
             // ── 8. Resolve the safe ───────────────────────────────────────────
@@ -483,7 +492,7 @@ class SalesService
 
     // ── Deduct inventory across FIFO batches, split InvoiceItem per batch ─────
 
-    private function processItem(Invoice $invoice, array $item): void
+    private function processItem(Invoice $invoice, array $item, \Illuminate\Support\Collection $products): void
     {
         $productId       = (int) $item['product_id'];
         $needed          = (float) $item['quantity'];
@@ -492,9 +501,15 @@ class SalesService
         $parentProductId = isset($item['parent_product_id']) ? (int) $item['parent_product_id'] : null;
         $role            = $item['role'] ?? null;
 
+        $product       = $products[$productId] ?? null;
+        $parentProduct = $parentProductId ? ($products[$parentProductId] ?? null) : null;
+        $batchPriced   = $product?->isBatchPriced() ?? false;
+
         // Fetch all batches with stock for this product in the seller's shop,
-        // ordered oldest-first (FIFO) and locked for the transaction.
-        $batches = $this->fifoBatchesQuery($productId, $invoice->shop_id)->lockForUpdate()->get();
+        // ordered oldest-first (FIFO) and locked for the transaction. For
+        // batch-priced products, unpriced batches are excluded entirely — the
+        // stock guard already confirmed enough PRICED stock exists.
+        $batches = $this->fifoBatchesQuery($productId, $invoice->shop_id, $batchPriced)->lockForUpdate()->get();
 
         $remaining = $needed;
 
@@ -509,26 +524,56 @@ class SalesService
             // Deduct — never delete the row even if it reaches zero
             $goods->decrement('current_quantity', $take);
 
+            // Batch-priced products: the line price is ALWAYS the consumed
+            // batch's own selling_price — never the client-submitted or
+            // distributed price — so a sale spanning a FIFO price boundary
+            // (old batch price for part of the qty, new batch price for the
+            // rest) is billed and reported exactly per the batch actually
+            // drained. unit_cost snapshots the same batch's purchase cost.
+            $linePrice = $batchPriced ? (float) $goods->supplyItem->selling_price : $price;
+            $unitCost  = (float) ($goods->supplyItem->unit_price ?? 0);
+            $lineCost  = round($unitCost * $take, 2);
+            $lineProfit = round(($linePrice * $take) - $lineCost, 2);
+
             InvoiceItem::create([
                 'invoice_id'         => $invoice->id,
                 'product_id'         => $productId,
+                // Permanent DISPLAY snapshot — frozen exactly as the product
+                // was at this moment; a later rename/re-SKU never touches it.
+                'product_name'       => $product?->name,
+                'product_sku'        => $product?->sku,
+                'product_barcode'    => $product?->barcode,
                 'parent_product_id'  => $parentProductId,
+                // Same permanent-snapshot treatment for the catalog "parent"
+                // a composed oil/bottle/alcohol line was sold under — the
+                // grouped receipt display must freeze this name too, never
+                // read it live off the parent Product later.
+                'parent_product_name' => $parentProduct?->name,
                 'role'               => $role,
                 'goods_id'           => $goods->id,
+                // Permanent accounting snapshot — this batch, this cost, this
+                // profit, computed once and never touched again.
+                'supply_item_id'     => $goods->supply_item_id,
                 'quantity'           => $take,
-                'price'              => $price,
+                'price'              => $linePrice,
+                'unit_cost'          => $unitCost,
+                'line_cost'          => $lineCost,
+                'line_profit'        => $lineProfit,
             ]);
 
             $remaining = round($remaining - $take, 3);
         }
 
         // Oversell: if demand exceeds available stock, push the remainder into
-        // the most-recent batch (driving its quantity negative).  goods_id is
-        // non-nullable, so we must always resolve a batch.
+        // the most-recent batch (driving its quantity negative). goods_id is
+        // non-nullable, so we must always resolve a batch. For batch-priced
+        // products this should not happen — the stock guard already rejected
+        // insufficient priced stock upfront — kept only as a safety net.
         if ($remaining > 0) {
             // Prefer the last-used batch; fall back to any batch for this product.
             $fallback = $batches->last()
-                ?? Goods::whereHas('supplyItem', fn($q) => $q->where('product_id', $productId))
+                ?? Goods::with('supplyItem')
+                    ->whereHas('supplyItem', fn($q) => $q->where('product_id', $productId))
                     ->where('shop_id', $invoice->shop_id)
                     ->orderByDesc('date')
                     ->orderByDesc('id')
@@ -538,14 +583,27 @@ class SalesService
             if ($fallback) {
                 $fallback->decrement('current_quantity', $remaining);
 
+                $linePrice = $batchPriced ? (float) ($fallback->supplyItem->selling_price ?? $price) : $price;
+                $unitCost  = (float) ($fallback->supplyItem->unit_price ?? 0);
+                $lineCost  = round($unitCost * $remaining, 2);
+                $lineProfit = round(($linePrice * $remaining) - $lineCost, 2);
+
                 InvoiceItem::create([
                     'invoice_id'         => $invoice->id,
                     'product_id'         => $productId,
+                    'product_name'       => $product?->name,
+                    'product_sku'        => $product?->sku,
+                    'product_barcode'    => $product?->barcode,
                     'parent_product_id'  => $parentProductId,
+                    'parent_product_name' => $parentProduct?->name,
                     'role'               => $role,
                     'goods_id'           => $fallback->id,
+                    'supply_item_id'     => $fallback->supply_item_id,
                     'quantity'           => $remaining,
-                    'price'              => $price,
+                    'price'              => $linePrice,
+                    'unit_cost'          => $unitCost,
+                    'line_cost'          => $lineCost,
+                    'line_profit'        => $lineProfit,
                 ]);
             }
             // If no batch exists at all, the invoice item is simply skipped —
@@ -558,14 +616,69 @@ class SalesService
      * source of truth for "which batch gets drained first"; processItem() (real
      * deduction) and quoteCartCost() (read-only pre-sale preview) both build on
      * this exact query so the two never compute cost differently.
+     *
+     * $requirePriced — batch-priced products (Product::isBatchPriced()) only:
+     * excludes any batch with a null selling_price, making an unpriced supply
+     * structurally invisible to FIFO until a manager prices it in Pricing
+     * Management. Never set for non-batch-priced products (oils, compounds),
+     * whose pricing has nothing to do with SupplyItem.selling_price.
      */
-    private function fifoBatchesQuery(int $productId, int $shopId)
+    private function fifoBatchesQuery(int $productId, int $shopId, bool $requirePriced = false)
     {
-        return Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $productId))
+        $query = Goods::with('supplyItem')
+            // Archived batches are retired from sale permanently, regardless
+            // of product type — they still exist forever for historical
+            // invoices to resolve (see SupplyItem::isArchived()), they're
+            // just never drained again.
+            ->whereHas('supplyItem', fn ($q) => $q->where('product_id', $productId)->whereNull('archived_at'))
             ->where('shop_id', $shopId)
             ->where('current_quantity', '>', 0)
             ->orderBy('date')
             ->orderBy('id');
+
+        if ($requirePriced) {
+            $query->whereHas('supplyItem', fn ($q) => $q->where('product_id', $productId)->whereNotNull('selling_price'));
+        }
+
+        return $query;
+    }
+
+    /**
+     * Batch-priced products only: walks the same priced/in-stock FIFO order
+     * fifoBatchesQuery() and processItem() use, to determine — BEFORE the
+     * invoice is created — exactly which batches (and at which prices) a
+     * requested quantity will actually be drained from. Needed so the
+     * invoice total / payment validation / minimum-price check agree with
+     * what processItem() will persist even when a sale spans a FIFO price
+     * boundary (part of the qty at the old batch's price, the rest at the
+     * new batch's price) — never a single blended/legacy flat price.
+     *
+     * @return array{0: float weighted_avg_unit_price, 1: float total_price}
+     */
+    private function quoteBatchPriceSplit(int $productId, int $shopId, float $quantity): array
+    {
+        $batches   = $this->fifoBatchesQuery($productId, $shopId, true)->get();
+        $remaining = $quantity;
+        $total     = 0.0;
+
+        foreach ($batches as $goods) {
+            if ($remaining <= 0) {
+                break;
+            }
+            $take = min((float) $goods->current_quantity, $remaining);
+            $total += $take * (float) $goods->supplyItem->selling_price;
+            $remaining = round($remaining - $take, 3);
+        }
+
+        // Safety net only — the stock guard already rejects insufficient
+        // priced stock before this is ever called.
+        if ($remaining > 0 && $batches->isNotEmpty()) {
+            $total += $remaining * (float) $batches->last()->supplyItem->selling_price;
+        }
+
+        $avg = $quantity > 0 ? round($total / $quantity, 4) : 0.0;
+
+        return [$avg, round($total, 2)];
     }
 
     /**
@@ -580,15 +693,19 @@ class SalesService
      */
     public function quoteCartCost(int $shopId, array $items): array
     {
+        $productIds = array_column($items, 'product_id');
+        $products   = Product::whereIn('id', $productIds)->get()->keyBy('id');
+
         $lines = [];
         $totalCost = 0.0;
 
         foreach ($items as $item) {
-            $productId = (int) $item['product_id'];
-            $remaining = (float) $item['quantity'];
-            $lineCost  = 0.0;
+            $productId   = (int) $item['product_id'];
+            $remaining   = (float) $item['quantity'];
+            $lineCost    = 0.0;
+            $batchPriced = $products[$productId]?->isBatchPriced() ?? false;
 
-            $batches = $this->fifoBatchesQuery($productId, $shopId)->get();
+            $batches = $this->fifoBatchesQuery($productId, $shopId, $batchPriced)->get();
             $lastBatch = null;
 
             foreach ($batches as $goods) {
@@ -649,9 +766,30 @@ class SalesService
      *
      * @return array{0: array, 1: float}
      */
-    private function priceInvoiceItems(array $data, \Illuminate\Support\Collection $products): array
+    private function priceInvoiceItems(array $data, \Illuminate\Support\Collection $products, int $shopId): array
     {
         $items = $data['items'];
+
+        // Batch-priced products (Ready Products, Packaging, and any future
+        // inventory item priced per-batch): the cashier NEVER chooses this
+        // price — it is always resolved from the FIFO-consumed batch(es),
+        // overriding any client-submitted price and taking priority over every
+        // mode below (manual / auto-configured / global-total), which remain
+        // exactly as before for every other product type. Computed as a "dry
+        // run" of the same priced/in-stock FIFO walk processItem() performs,
+        // so a sale spanning a price boundary is billed at the true blended
+        // total, not a single stale/legacy flat price.
+        foreach ($items as &$item) {
+            if (! empty($item['role'])) {
+                continue; // compound component sub-lines price from the Builder's own reference cost
+            }
+            $product = $products[$item['product_id']] ?? null;
+            if ($product && $product->isBatchPriced()) {
+                [$avgPrice, ] = $this->quoteBatchPriceSplit($product->id, $shopId, (float) $item['quantity']);
+                $item['price'] = $avgPrice;
+            }
+        }
+        unset($item);
 
         // Explicit Global-Total mode: the cashier can always fall back to the
         // legacy global-total workflow on demand (legacy products / special
@@ -682,7 +820,7 @@ class SalesService
 
         foreach ($items as $item) {
             $product = $products[$item['product_id']] ?? null;
-            $price   = $product ? $this->resolveConfiguredUnitPrice($product) : null;
+            $price   = $product ? $this->resolveConfiguredUnitPrice($product, $shopId) : null;
             $configured[$item['product_id']] = $price;
             if ($price === null) {
                 $allConfigured = false;
@@ -713,7 +851,7 @@ class SalesService
      * has not been configured yet (→ triggers legacy fallback). Behavior is
      * driven purely by the Product Type — never by category name.
      */
-    private function resolveConfiguredUnitPrice(Product $product): ?float
+    private function resolveConfiguredUnitPrice(Product $product, ?int $shopId = null): ?float
     {
         $category = $product->category;
         $type     = $category?->productType;
@@ -731,11 +869,28 @@ class SalesService
         }
 
         if ($type->pricing_source === 'product') {
-            // Non-oil: selling price lives on the product.
+            // Batch-priced products: "configured price" IS the current FIFO
+            // batch's own selling_price ("what the customer pays right now"),
+            // never the legacy flat product field — requires a shop context
+            // to know which batch is next in line. Falls back to the legacy
+            // flat field only when no shop context is available (e.g. a
+            // Compound Product's oil/bottle references, which are never
+            // batch-priced themselves) so nothing else regresses.
+            if ($product->isBatchPriced() && $shopId !== null) {
+                return $this->currentFifoBatchPrice($product->id, $shopId);
+            }
             return $product->selling_price !== null ? (float) $product->selling_price : null;
         }
 
         return null;
+    }
+
+    /** The selling_price of the oldest priced, in-stock batch — "what the customer pays right now." */
+    private function currentFifoBatchPrice(int $productId, int $shopId): ?float
+    {
+        $goods = $this->fifoBatchesQuery($productId, $shopId, true)->first();
+
+        return $goods?->supplyItem?->selling_price !== null ? (float) $goods->supplyItem->selling_price : null;
     }
 
     // ── Distribute global total across items (A→B→C→D pipeline) ─────────────
@@ -880,7 +1035,7 @@ class SalesService
                 'sku'                   => $comp->sku,
                 'unit'                  => $type->default_unit ?? ($comp->scalar ?? ''),
                 'quantity'              => (float) $c->quantity,   // per 1 parent (or default suggestion, when variable)
-                'configured_unit_price' => $this->resolveConfiguredUnitPrice($comp),
+                'configured_unit_price' => $this->resolveConfiguredUnitPrice($comp, $shopId),
                 'shop_stock'            => $stock,
                 'is_variable_quantity'  => (bool) $c->is_variable_quantity,
                 'component_group'       => $c->component_group,
@@ -935,7 +1090,7 @@ class SalesService
         return $products->map(fn ($p) => [
             'id' => $p->id, 'name' => $p->name, 'sku' => $p->sku, 'barcode' => $p->barcode,
             'image' => $p->image, 'product_type' => $p->product_type,
-            'configured_unit_price' => $p->product_type === Product::TYPE_READY_PRODUCT ? $this->resolveConfiguredUnitPrice($p) : null,
+            'configured_unit_price' => $p->product_type === Product::TYPE_READY_PRODUCT ? $this->resolveConfiguredUnitPrice($p, $shopId) : null,
             'shop_stock' => $p->product_type === Product::TYPE_READY_PRODUCT ? (float) ($stocks[$p->id] ?? 0) : null,
             'unit' => $p->scalar,
             // Phase 7 — Composite Products only: a preferred oil to pre-select (never
@@ -1026,7 +1181,7 @@ class SalesService
             'sku'                   => $p->sku,
             'unit'                  => $p->scalar,
             'capacity_ml'           => $p->capacity_ml !== null ? (float) $p->capacity_ml : null,
-            'configured_unit_price' => $this->resolveConfiguredUnitPrice($p),
+            'configured_unit_price' => $this->resolveConfiguredUnitPrice($p, $shopId),
             'shop_stock'            => (float) ($stocks[$p->id] ?? 0),
         ])->values()->all();
     }
@@ -1050,8 +1205,8 @@ class SalesService
             abort(422, 'الكمية المطلوبة من الزيت أكبر من سعة الزجاجة المختارة.');
         }
 
-        $oilUnitPrice    = $this->resolveConfiguredUnitPrice($oil) ?? 0.0;
-        $bottleUnitPrice = $this->resolveConfiguredUnitPrice($bottle) ?? 0.0;
+        $oilUnitPrice    = $this->resolveConfiguredUnitPrice($oil, $shopId) ?? 0.0;
+        $bottleUnitPrice = $this->resolveConfiguredUnitPrice($bottle, $shopId) ?? 0.0;
 
         // Everything below is scaled by Manufacturing Quantity — oilQty/alcoholQty are
         // PER BOTTLE amounts; oilCost/bottleCost/alcoholCost represent the whole batch.
@@ -1076,7 +1231,7 @@ class SalesService
         $alcoholStock = 0.0;
         if ($alcoholProductId && $alcoholQty !== null) {
             $alcohol = Product::with('category.productType')->findOrFail($alcoholProductId);
-            $alcoholUnitPrice = $this->resolveConfiguredUnitPrice($alcohol) ?? 0.0;
+            $alcoholUnitPrice = $this->resolveConfiguredUnitPrice($alcohol, $shopId) ?? 0.0;
             $alcoholCost = round($alcoholQty * $quantity * $alcoholUnitPrice, 2);
             $alcoholStock = (float) Goods::whereHas('supplyItem', fn ($q) => $q->where('product_id', $alcohol->id))
                 ->where('shop_id', $shopId)->sum('current_quantity');

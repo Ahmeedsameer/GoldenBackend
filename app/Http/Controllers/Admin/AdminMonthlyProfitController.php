@@ -9,11 +9,13 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 /**
- * Monthly revenue vs. estimated cost, ties Sales data together with the
- * Pricing module's tracked `purchase_cost` per product — same live-cost
- * approximation used by PricingService::profit_after and the Branch
- * Comparison report (no COGS is captured at sale time anywhere in this
- * schema, so this is always an "estimated" profit, never exact).
+ * Monthly revenue vs. actual cost — cost/profit are read directly from each
+ * invoice_items row's own permanent accounting snapshot (line_cost, set once
+ * at sale time from the exact FIFO batch consumed — see
+ * SalesService::processItem() and InvoiceItem::line_cost/line_profit), never
+ * from the product's current purchase_cost. This is the real historical
+ * figure, not an estimate: a batch's price changing later, or the product
+ * being renamed/archived/deleted, can never alter what a past month reports.
  */
 class AdminMonthlyProfitController extends Controller
 {
@@ -32,7 +34,6 @@ class AdminMonthlyProfitController extends Controller
     {
         $q = DB::table('invoice_items as ii')
             ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
-            ->join('products as p', 'p.id', '=', 'ii.product_id')
             ->where('inv.status', 'approved')
             ->whereBetween('inv.date', [$from, $to]);
 
@@ -43,7 +44,7 @@ class AdminMonthlyProfitController extends Controller
         return $q->selectRaw("
                 DATE_FORMAT(inv.date, '%Y-%m') as month,
                 SUM(ii.quantity * ii.price) as revenue,
-                SUM(ii.quantity * COALESCE(p.purchase_cost, 0)) as estimated_cost
+                SUM(COALESCE(ii.line_cost, ii.quantity * ii.unit_cost)) as estimated_cost
             ")
             ->groupBy('month')
             ->orderBy('month')
@@ -94,7 +95,7 @@ class AdminMonthlyProfitController extends Controller
         [$from, $to] = $this->parseDates($request);
         $shopId = $request->filled('shop_id') ? (int) $request->get('shop_id') : null;
 
-        $columns = ['الشهر', 'الإيرادات', 'التكلفة التقديرية', 'الربح التقديري', 'هامش الربح %'];
+        $columns = ['الشهر', 'الإيرادات', 'التكلفة الفعلية', 'الربح الفعلي', 'هامش الربح %'];
         $rows = $this->monthlyRows($from, $to, $shopId)->map(function ($r) {
             $revenue = (float) $r->revenue;
             $cost = (float) $r->estimated_cost;

@@ -97,6 +97,11 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::get('search',        [UsersManagmentController::class, 'search']);
         Route::post('create',       [UsersManagmentController::class, 'store']);
         Route::get('show/{id}',     [UsersManagmentController::class, 'show']);
+        // Always scoped to the authenticated admin's own account — no :id param.
+        Route::put('profile',           [UsersManagmentController::class, 'updateProfile']);
+        Route::put('change-password',   [UsersManagmentController::class, 'changePassword']);
+        // Admin resetting another user's password — new password only, never reads the old one.
+        Route::put('{id}/reset-password', [UsersManagmentController::class, 'resetPassword']);
     });
 
     // ── Product Types (inventory behavior: Oil, Bottle, Accessory, Packaging) ─
@@ -494,6 +499,7 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'pre
     Route::get('',              [PricingController::class, 'index']);
     Route::get('export',        [PricingController::class, 'export']);
     Route::get('{id}',          [PricingController::class, 'show']);
+    Route::get('{id}/batches',  [PricingController::class, 'batches']);
 });
 
 // Admin-only: price history, refreshing costs, and changing selling prices.
@@ -502,6 +508,8 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 
     Route::get('update/preview',        [PricingController::class, 'updatePreview']);
     Route::post('update/apply',         [PricingController::class, 'applyUpdate']);
     Route::put('{id}/selling-price',    [PricingController::class, 'updateSellingPrice']);
+    Route::put('{id}/batches/{supplyItemId}/price', [PricingController::class, 'priceBatch']);
+    Route::post('{id}/batches/{supplyItemId}/archive', [PricingController::class, 'archiveBatch']);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

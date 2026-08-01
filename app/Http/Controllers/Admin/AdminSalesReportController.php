@@ -264,22 +264,22 @@ class AdminSalesReportController extends Controller
     {
         [$from, $to] = $this->parseDates($request);
 
-        $q = InvoiceItem::join('invoices',   'invoice_items.invoice_id',  '=', 'invoices.id')
-            ->join('products',   'invoice_items.product_id',  '=', 'products.id')
-            ->leftJoin('categories', 'products.category_id', '=', 'categories.id')
+        // Historical revenue report — grouped by product_id (stable identity)
+        // ONLY, never also by the live products.name/sku (grouping by both
+        // would silently split one product's totals into two rows if it was
+        // renamed/re-SKU'd mid-period). Display name/sku come from each row's
+        // own frozen invoice_items.product_name/product_sku snapshot.
+        $base = InvoiceItem::join('invoices', 'invoice_items.invoice_id', '=', 'invoices.id')
             ->where('invoices.status', 'approved')
             ->whereBetween('invoices.date', [$from, $to]);
 
         if ($request->filled('shop_id')) {
-            $q->where('invoices.shop_id', (int) $request->get('shop_id'));
+            $base->where('invoices.shop_id', (int) $request->get('shop_id'));
         }
 
-        $rows = $q->selectRaw("
+        $rows = (clone $base)
+            ->selectRaw('
                 invoice_items.product_id,
-                products.name           as product_name,
-                products.sku,
-                products.scalar,
-                COALESCE(categories.name, '—') as category_name,
                 COALESCE(SUM(invoice_items.quantity), 0) as total_qty,
                 COALESCE(SUM(invoice_items.quantity * invoice_items.price), 0) as total_revenue,
                 COALESCE(AVG(invoice_items.price), 0) as avg_price,
@@ -287,17 +287,41 @@ class AdminSalesReportController extends Controller
                 COALESCE(MIN(invoice_items.price), 0) as min_price,
                 COUNT(DISTINCT invoices.id) as invoice_count,
                 COUNT(DISTINCT invoices.shop_id) as shop_count
-            ")
-            ->groupBy('invoice_items.product_id', 'products.name', 'products.sku', 'products.scalar', 'categories.name')
+            ')
+            ->groupBy('invoice_items.product_id')
             ->orderByDesc('total_revenue')
             ->limit(50)
-            ->get()
-            ->map(fn ($r) => [
+            ->get();
+
+        $productIds = $rows->pluck('product_id');
+
+        // Most recent name/sku snapshot within this same period/filter for
+        // each product — what it was actually called during these sales.
+        $latestSnapshots = (clone $base)
+            ->whereIn('invoice_items.product_id', $productIds)
+            ->orderByDesc('invoices.date')
+            ->orderByDesc('invoice_items.id')
+            ->get(['invoice_items.product_id', 'invoice_items.product_name', 'invoice_items.product_sku'])
+            ->unique('product_id')
+            ->keyBy('product_id');
+
+        // Unit + category are not identity fields (not in scope for the
+        // snapshot) — current values are fine here, purely descriptive.
+        $products = \App\Models\Product::with('category:id,name')
+            ->whereIn('id', $productIds)
+            ->get(['id', 'scalar', 'category_id'])
+            ->keyBy('id');
+
+        $rows = $rows->map(function ($r) use ($latestSnapshots, $products) {
+            $snapshot = $latestSnapshots[$r->product_id] ?? null;
+            $product  = $products[$r->product_id] ?? null;
+
+            return [
                 'product_id'    => (int)   $r->product_id,
-                'product_name'  => $r->product_name,
-                'sku'           => $r->sku ?? '—',
-                'scalar'        => $r->scalar ?? '',
-                'category_name' => $r->category_name,
+                'product_name'  => $snapshot->product_name ?? '—',
+                'sku'           => $snapshot->product_sku ?? '—',
+                'scalar'        => $product?->scalar ?? '',
+                'category_name' => $product?->category?->name ?? '—',
                 'total_qty'     => round((float) $r->total_qty, 3),
                 'total_revenue' => round((float) $r->total_revenue, 2),
                 'avg_price'     => round((float) $r->avg_price, 2),
@@ -305,7 +329,8 @@ class AdminSalesReportController extends Controller
                 'min_price'     => round((float) $r->min_price, 2),
                 'invoice_count' => (int)   $r->invoice_count,
                 'shop_count'    => (int)   $r->shop_count,
-            ]);
+            ];
+        });
 
         $totalRevenue = $rows->sum('total_revenue');
         $rows = $rows->map(fn ($r) => array_merge($r, [

@@ -9,14 +9,14 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 /**
- * Side-by-side branch comparison — revenue, estimated profit, most active
+ * Side-by-side branch comparison — revenue, actual profit, most active
  * seller, and most-used oil/bottle, per shop for the selected period.
  *
- * "Estimated profit" reuses the same live-cost approximation already used by
- * the Pricing module (PricingService::profit_after: selling price minus the
- * product's current `purchase_cost`) — there is no cost-at-sale-time field
- * captured anywhere in this schema, so this is a live-cost estimate, never a
- * precise historical COGS figure. Labeled "تقديري" (estimated) everywhere.
+ * Profit is read directly from each invoice_items row's own permanent
+ * accounting snapshot (line_cost, set once at sale time from the exact FIFO
+ * batch consumed — see SalesService::processItem() and
+ * InvoiceItem::line_cost/line_profit), never from the product's current
+ * purchase_cost. Real historical COGS, not a live-cost estimate.
  */
 class AdminBranchComparisonController extends Controller
 {
@@ -42,14 +42,13 @@ class AdminBranchComparisonController extends Controller
     {
         return DB::table('invoice_items as ii')
             ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
-            ->join('products as p', 'p.id', '=', 'ii.product_id')
             ->join('shops as s', 's.id', '=', 'inv.shop_id')
             ->where('inv.status', 'approved')
             ->whereBetween('inv.date', [$from, $to])
             ->selectRaw('
                 inv.shop_id, s.name as shop_name,
                 SUM(ii.quantity * ii.price) as revenue,
-                SUM(ii.quantity * COALESCE(p.purchase_cost, 0)) as estimated_cost
+                SUM(COALESCE(ii.line_cost, ii.quantity * ii.unit_cost)) as estimated_cost
             ')
             ->groupBy('inv.shop_id', 's.name')
             ->get();
@@ -70,17 +69,48 @@ class AdminBranchComparisonController extends Controller
 
     private function topRoleProductByShop(string $from, string $to, string $role)
     {
-        return DB::table('invoice_items as ii')
+        // Historical usage report — grouped by product_id (stable identity)
+        // ONLY. Grouping by the live products.name too (as before) would
+        // silently split one product's totals into two groups if it was
+        // renamed mid-period, potentially picking the wrong "top" product by
+        // a split vote. Display name comes from each row's own frozen
+        // invoice_items.product_name snapshot, never the live products table.
+        $rows = DB::table('invoice_items as ii')
             ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
-            ->join('products as p', 'p.id', '=', 'ii.product_id')
             ->where('ii.role', $role)
             ->where('inv.status', 'approved')
             ->whereBetween('inv.date', [$from, $to])
-            ->selectRaw('inv.shop_id, p.id as product_id, p.name as product_name, SUM(ii.quantity) as qty')
-            ->groupBy('inv.shop_id', 'p.id', 'p.name')
+            ->selectRaw('inv.shop_id, ii.product_id, SUM(ii.quantity) as qty')
+            ->groupBy('inv.shop_id', 'ii.product_id')
             ->get()
             ->groupBy('shop_id')
-            ->map(fn ($rows) => $rows->sortByDesc('qty')->first());
+            ->map(fn ($rows) => $rows->sortByDesc('qty')->first())
+            ->filter();
+
+        $productIds = $rows->pluck('product_id');
+        if ($productIds->isEmpty()) {
+            return $rows;
+        }
+
+        // Most recent snapshot name for each winning product within this same
+        // period/role/shop — reflects what it was actually called during
+        // these sales, not a later rename.
+        $latestNames = DB::table('invoice_items as ii')
+            ->join('invoices as inv', 'inv.id', '=', 'ii.invoice_id')
+            ->where('ii.role', $role)
+            ->where('inv.status', 'approved')
+            ->whereBetween('inv.date', [$from, $to])
+            ->whereIn('ii.product_id', $productIds)
+            ->orderByDesc('inv.date')
+            ->orderByDesc('ii.id')
+            ->get(['ii.product_id', 'ii.product_name'])
+            ->unique('product_id')
+            ->keyBy('product_id');
+
+        return $rows->map(function ($r) use ($latestNames) {
+            $r->product_name = $latestNames[$r->product_id]->product_name ?? '—';
+            return $r;
+        });
     }
 
     // ── GET /api/admin/reports/branch-comparison ─────────────────────────────
@@ -134,7 +164,7 @@ class AdminBranchComparisonController extends Controller
             ->where('status', 'approved')->whereBetween('date', [$from, $to])
             ->selectRaw('shop_id, COUNT(*) as invoice_count')->groupBy('shop_id')->pluck('invoice_count', 'shop_id');
 
-        $columns = ['الفرع', 'عدد الفواتير', 'الإيرادات', 'التكلفة التقديرية', 'الربح التقديري', 'هامش الربح %'];
+        $columns = ['الفرع', 'عدد الفواتير', 'الإيرادات', 'التكلفة الفعلية', 'الربح الفعلي', 'هامش الربح %'];
         $rows = $revCost->sortByDesc('revenue')->map(function ($r) use ($invoiceCounts) {
             $revenue = (float) $r->revenue;
             $cost = (float) $r->estimated_cost;

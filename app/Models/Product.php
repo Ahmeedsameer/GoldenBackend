@@ -79,6 +79,40 @@ class Product extends Model
         return $this->belongsTo(Category::class);
     }
 
+    /**
+     * Every purchase batch (SupplyItem) ever received for this product —
+     * oldest first, ordered exactly like real FIFO consumption
+     * (SalesService::fifoBatchesQuery() orders Goods by supply date then id;
+     * every SupplyItem's initial Goods row is dated the same as its Supply,
+     * so ordering by the parent Supply's date/id here matches FIFO order,
+     * unlike SupplyItem.created_at which can drift from it during backdated
+     * seeding).
+     */
+    public function supplyItems()
+    {
+        return $this->hasMany(SupplyItem::class)
+            ->join('supplies', 'supplies.id', '=', 'supply_items.supply_id')
+            ->orderBy('supplies.date')
+            ->orderBy('supply_items.id')
+            ->select('supply_items.*', 'supplies.date as supply_date');
+    }
+
+    /**
+     * Batch-aware pricing applies to any product priced at the product level
+     * (Ready Products, Packaging, and generically any future type flagged the
+     * same way) — NOT oils (priced by weight at the category, pricing_source
+     * = 'category') and NOT Compounds (no real purchase batches; priced
+     * fresh per sale in the Product Builder instead).
+     */
+    public function isBatchPriced(): bool
+    {
+        if ($this->product_type === self::TYPE_COMPOUND) {
+            return false;
+        }
+
+        return $this->category?->productType?->pricing_source === ProductType::PRICING_SOURCE_PRODUCT;
+    }
+
     /** BOM components (recipe) — this product is composed of these. */
     public function components()
     {

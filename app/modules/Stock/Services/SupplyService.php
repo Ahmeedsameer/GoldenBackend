@@ -224,7 +224,12 @@ class SupplyService
     }
 
     /**
-     * حذف التوريد — يُمنع إن كانت بضاعته قد نُقلت جزئياً إلى فروع.
+     * حذف التوريد — يُمنع إن كانت بضاعته قد نُقلت جزئياً إلى فروع، أو إن كانت
+     * أي دفعة (SupplyItem) منه قد ظهرت بالفعل في فاتورة بيع — الفواتير
+     * القديمة يجب أن تستطيع دائماً تحديد الدفعة التي بيعت منها (Batch ID)،
+     * فهذا فحص صريح ومباشر على invoice_items.supply_item_id، إضافة إلى قيد
+     * قاعدة البيانات نفسه (restrictOnDelete) الذي يمنع هذا فعلياً حتى لو
+     * تجوّز كود التطبيق يوماً ما هذا الفحص.
      * الـ cascade يحذف supply_items ثم goods تلقائياً.
      */
     public function delete(Supply $supply): void
@@ -236,6 +241,14 @@ class SupplyService
 
             if ($hasTransferred) {
                 abort(422, 'لا يمكن حذف التوريد لأن جزءاً من بضاعته قد نُقل إلى الفروع');
+            }
+
+            $hasInvoiceHistory = $supply->items()
+                ->whereHas('invoiceItems')
+                ->exists();
+
+            if ($hasInvoiceHistory) {
+                abort(422, 'لا يمكن حذف التوريد — إحدى دفعاته مرتبطة بفواتير بيع فعلية. يمكن أرشفة الدفعة بدلاً من ذلك.');
             }
 
             $supply->delete();

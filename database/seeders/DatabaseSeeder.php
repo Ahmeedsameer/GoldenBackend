@@ -35,6 +35,8 @@ class DatabaseSeeder extends Seeder
             SupplySeeder::class,
             HrDeductionSettingSeeder::class,   // HR: default (configurable) deduction rules
             ShiftTemplateSeeder::class,        // HR: default shift templates (schedule module)
+            HistoricalActivitySeeder::class,   // ~2.5 months of backdated realistic activity (purely additive)
+            BranchActivityTopupSeeder::class,  // Sheraton branch: rotating temporary-staff sales activity
         ]);
     }
 }
