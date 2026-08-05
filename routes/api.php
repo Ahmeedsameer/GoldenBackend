@@ -102,6 +102,8 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::put('change-password',   [UsersManagmentController::class, 'changePassword']);
         // Admin resetting another user's password — new password only, never reads the old one.
         Route::put('{id}/reset-password', [UsersManagmentController::class, 'resetPassword']);
+        // Deactivate/reactivate an admin account — never a hard delete (see UsersManagmentController::toggleStatus).
+        Route::put('{id}/toggle-status', [UsersManagmentController::class, 'toggleStatus']);
     });
 
     // ── Product Types (inventory behavior: Oil, Bottle, Accessory, Packaging) ─
@@ -145,7 +147,10 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::get('oil-options', [ProductController::class, 'oilOptions']);
         Route::get('{id}',    [ProductController::class, 'show']);
         Route::put('{id}',    [ProductController::class, 'update']);
-        Route::delete('{id}', [ProductController::class, 'destroy']);
+        // Products are never physically deleted — archive/restore only (see
+        // ProductController::archive()/restore() and Product::scopeNotArchived()).
+        Route::post('{id}/archive', [ProductController::class, 'archive']);
+        Route::post('{id}/restore', [ProductController::class, 'restore']);
         // BOM / recipe (components of a composed product)
         Route::get('{id}/components', [\App\Http\Controllers\ProductComponentController::class, 'index']);
         Route::put('{id}/components', [\App\Http\Controllers\ProductComponentController::class, 'sync']);
@@ -378,7 +383,9 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::post('employees',                   [\App\Modules\Hr\Controllers\EmployeeController::class, 'store']);
         Route::get('employees/{id}',               [\App\Modules\Hr\Controllers\EmployeeController::class, 'show']);
         Route::put('employees/{id}',               [\App\Modules\Hr\Controllers\EmployeeController::class, 'update']);
-        Route::put('employees/{id}/toggle-status', [\App\Modules\Hr\Controllers\EmployeeController::class, 'toggleStatus']);
+        Route::put('employees/{id}/toggle-status',   [\App\Modules\Hr\Controllers\EmployeeController::class, 'toggleStatus']);
+        Route::post('employees/{id}/end-employment/preview', [\App\Modules\Hr\Controllers\EmployeeController::class, 'previewEndEmployment']);
+        Route::put('employees/{id}/end-employment',  [\App\Modules\Hr\Controllers\EmployeeController::class, 'endEmployment']);
         Route::get('employees/{id}/timeline',      [\App\Modules\Hr\Controllers\SelfServiceController::class, 'timelineFor']);
 
         // Leave review (approve/reject) — admin only
@@ -401,10 +408,22 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::put('advances/{id}/cancel',      [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'cancel']);
         Route::put('advances/{id}/plan',        [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'updatePlan']);
         Route::post('advances/{id}/repayments', [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'storeRepayment']);
+        Route::put('advances/{id}/default-safe', [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'changeDefaultSafe']);
+        Route::get('advances/{id}/transactions', [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'transactions']);
 
         // Phase 6.3 — dedicated Salary Advance report (admin only)
         Route::get('reports/advances/export', [\App\Modules\Hr\Controllers\SalaryAdvanceReportController::class, 'export']);
         Route::get('reports/advances',        [\App\Modules\Hr\Controllers\SalaryAdvanceReportController::class, 'data']);
+
+        // Payroll + Treasury integration — dedicated reports (admin only)
+        Route::get('reports/payroll/export',            [\App\Modules\Hr\Controllers\PayrollReportController::class, 'export']);
+        Route::get('reports/payroll',                    [\App\Modules\Hr\Controllers\PayrollReportController::class, 'data']);
+        Route::get('reports/salary-payments/export',     [\App\Modules\Hr\Controllers\SalaryPaymentReportController::class, 'export']);
+        Route::get('reports/salary-payments',             [\App\Modules\Hr\Controllers\SalaryPaymentReportController::class, 'data']);
+        Route::get('reports/advance-installments/export', [\App\Modules\Hr\Controllers\AdvanceInstallmentReportController::class, 'export']);
+        Route::get('reports/advance-installments',         [\App\Modules\Hr\Controllers\AdvanceInstallmentReportController::class, 'data']);
+        Route::get('reports/leave-deductions/export',     [\App\Modules\Hr\Controllers\LeaveDeductionReportController::class, 'export']);
+        Route::get('reports/leave-deductions',             [\App\Modules\Hr\Controllers\LeaveDeductionReportController::class, 'data']);
 
         // Deduction settings (configurable)
         Route::get('deduction-settings',       [\App\Modules\Hr\Controllers\DeductionSettingController::class, 'index']);
@@ -415,6 +434,14 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::put('payrolls/{id}/lock',    [\App\Modules\Hr\Controllers\PayrollController::class, 'lock']);
         Route::put('payrolls/{id}/unlock',  [\App\Modules\Hr\Controllers\PayrollController::class, 'unlock']);
         Route::put('payrolls/{id}/paid',    [\App\Modules\Hr\Controllers\PayrollController::class, 'markPaid']);
+        Route::put('payrolls/{id}/pay',     [\App\Modules\Hr\Controllers\PayrollController::class, 'pay']);
+        Route::post('payrolls/pay-all',     [\App\Modules\Hr\Controllers\PayrollController::class, 'payAll']);
+        Route::get('payrolls/summary',      [\App\Modules\Hr\Controllers\PayrollController::class, 'summary']);
+        Route::get('payrolls/{id}/transactions', [\App\Modules\Hr\Controllers\PayrollController::class, 'transactions']);
+
+        // Final Settlement documents — read-only, admin only (created by end-employment above)
+        Route::get('settlements',      [\App\Modules\Hr\Controllers\SettlementController::class, 'index']);
+        Route::get('settlements/{id}', [\App\Modules\Hr\Controllers\SettlementController::class, 'show']);
 
         // Employee temporary transfers
         Route::get('transfers',              [\App\Modules\Hr\Controllers\TransferController::class, 'index']);
@@ -512,6 +539,42 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 
     Route::post('{id}/batches/{supplyItemId}/archive', [PricingController::class, 'archiveBatch']);
 });
 
+// ─── Customer Management ─────────────────────────────────────────────────────
+// Admin: full access. Manager: view customers + reports, scoped to their own
+// branch (see CustomerController::scopeToManager()). Seller: no list access —
+// only sales/customers (search + quick-create, cashier group above) and a
+// single customer's own show(), scoped to customers they've personally sold to.
+Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager']], function () {
+    Route::get('customers/reports/new',      [\App\Modules\Sales\Controllers\CustomerController::class, 'newCustomers']);
+    Route::get('customers/reports/inactive', [\App\Modules\Sales\Controllers\CustomerController::class, 'inactiveCustomers']);
+    Route::get('customers',                  [\App\Modules\Sales\Controllers\CustomerController::class, 'index']);
+    // Internal notes — Admin/Manager can edit; Seller still sees them (read-only) via show() below.
+    Route::put('customers/{id}/notes',       [\App\Modules\Sales\Controllers\CustomerController::class, 'updateNotes']);
+});
+// Edit the customer's own info — Admin only (Manager stays view-only, per the original permission model).
+Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function () {
+    Route::put('customers/{id}', [\App\Modules\Sales\Controllers\CustomerController::class, 'update']);
+});
+Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager,sales']], function () {
+    Route::get('customers/{id}', [\App\Modules\Sales\Controllers\CustomerController::class, 'show']);
+    Route::get('customers/{id}/similar', [\App\Modules\Sales\Controllers\CustomerController::class, 'similar']);
+    Route::get('customers/{id}/notes',   [\App\Modules\Sales\Controllers\CustomerController::class, 'notesHistory']);
+    Route::post('customers/{id}/notes-history', [\App\Modules\Sales\Controllers\CustomerController::class, 'addNote']);
+    Route::put('customers/{id}/notes-history/{noteId}', [\App\Modules\Sales\Controllers\CustomerController::class, 'editNote']);
+    // Delete is Admin-only, enforced in-method (abort_unless in deleteNote())
+    // — same "everyone hits the route, permission checked in-method" pattern
+    // authorizeView() already uses elsewhere in this controller.
+    Route::delete('customers/{id}/notes-history/{noteId}', [\App\Modules\Sales\Controllers\CustomerController::class, 'deleteNote']);
+    Route::get('tags', [\App\Modules\Sales\Controllers\TagController::class, 'index']);
+});
+// Tags — manage (create/attach/detach) and Export — Admin/Manager only.
+Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager']], function () {
+    Route::post('tags', [\App\Modules\Sales\Controllers\TagController::class, 'store']);
+    Route::post('customers/{id}/tags', [\App\Modules\Sales\Controllers\CustomerController::class, 'attachTag']);
+    Route::delete('customers/{id}/tags/{tagId}', [\App\Modules\Sales\Controllers\CustomerController::class, 'detachTag']);
+    Route::get('customers/{id}/export', [\App\Modules\Sales\Controllers\CustomerController::class, 'export']);
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Branch Operations & Logistics — Phase 5.1 permission model (manager-driven):
 //   Admin        — observes everything, is the Warehouse's manager, can
@@ -606,6 +669,7 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 
 Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'branch-operations/counts'], function () {
     Route::get('',                    [InventoryCountController::class, 'index']);
     Route::get('{id}',                [InventoryCountController::class, 'show']);
+    Route::get('{id}/export',         [InventoryCountController::class, 'export']);
     Route::post('',                   [InventoryCountController::class, 'store']);
     Route::post('{id}/record',        [InventoryCountController::class, 'recordCounts']);
     Route::post('{id}/submit-review', [InventoryCountController::class, 'submitForReview']);
@@ -687,6 +751,7 @@ Route::group(['middleware' => ['api', CheckRole::class . ':sales,manager']], fun
 
         // ── Cashier utility endpoints (for UI dropdowns / search) ─────────────
         Route::get('goods',       [CashierController::class, 'searchGoods']);
+        Route::get('goods/barcode', [CashierController::class, 'findGoodsByBarcode']);
         Route::get('unstocked-products', [CashierController::class, 'unstockedProducts']);
         Route::get('composable-products', [CashierController::class, 'composableProducts']);
         Route::get('catalog-products', [CashierController::class, 'catalogProducts']);
@@ -697,6 +762,7 @@ Route::group(['middleware' => ['api', CheckRole::class . ':sales,manager']], fun
         Route::get('products/{id}/components', [CashierController::class, 'productComponents']);
         Route::get('categories',  [CashierController::class, 'getCategories']);
         Route::get('customers',   [CashierController::class, 'searchCustomers']);
+        Route::post('customers',  [CashierController::class, 'createCustomer']);
         Route::get('currencies',  [CashierController::class, 'getCurrencies']);
         Route::get('payment-methods', [CashierController::class, 'getPaymentMethods']);
         Route::post('quote-cost', [CashierController::class, 'quoteCost']);

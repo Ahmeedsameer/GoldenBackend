@@ -19,11 +19,15 @@ class AdminFinancialReportController extends Controller
     // ("must participate in accounting, not just be stored"). Other pre-existing
     // gaps (advance_disbursement, supplier_payment, ... never added here) are
     // left untouched — out of scope for this change.
+    // Payroll+Treasury integration: 'salary_payment' added so paid salaries
+    // actually show up here too — same reasoning as bank_charge above (a real,
+    // reportable expense, not one to silently omit).
     private const REAL_TYPES = [
         'sale', 'refund',
         'admin_deposit', 'admin_withdrawal',
         'manager_deposit', 'manager_expense',
         'bank_charge', 'bank_charge_reversal',
+        'salary_payment',
     ];
 
     /** GET /api/admin/reports/financial/export?format=pdf|excel — the safe-transaction ledger for the period. */

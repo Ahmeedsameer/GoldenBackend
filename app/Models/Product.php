@@ -70,9 +70,16 @@ class Product extends Model
         'default_selling_price' => 'decimal:2',
         'priced_cost'           => 'decimal:2',
         'priced_at'             => 'datetime',
+        'archived_at'           => 'datetime',
     ];
 
-    protected $appends = ['profit'];
+    protected $appends = ['profit', 'is_archived'];
+
+    /** Archived (soft-disabled, never physically deleted) — mirrors SupplyItem::isArchived(). */
+    public function getIsArchivedAttribute(): bool
+    {
+        return $this->archived_at !== null;
+    }
 
     public function category()
     {
@@ -155,8 +162,21 @@ class Product extends Model
         return $query->where(function ($q) use ($term) {
             $q->where('name', 'like', "%{$term}%")
               ->orWhere('sku', 'like', "%{$term}%")
-              ->orWhere('barcode', 'like', "%{$term}%");
+              ->orWhere('barcode', 'like', "%{$term}%")
+              ->orWhereHas('category', fn ($cq) => $cq->where('name', 'like', "%{$term}%"));
         });
+    }
+
+    /**
+     * Excludes archived products — apply to every "browse/search/pick a
+     * product" query (Cashier, Product Builder, Pricing, Supply/Transfer
+     * pickers, Product Management's default list). Never apply this to a
+     * historical load (an invoice/supply/count/report reading an already-known
+     * product via its relation) — archived products must keep working there.
+     */
+    public function scopeNotArchived($query)
+    {
+        return $query->whereNull('archived_at');
     }
 
     /**

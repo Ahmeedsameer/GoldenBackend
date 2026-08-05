@@ -42,6 +42,15 @@ class SupplyService
             $query->whereDate('date', '<=', $filters['date_to']);
         }
 
+        if (!empty($filters['search'])) {
+            $term = $filters['search'];
+            $query->where(function ($q) use ($term) {
+                $q->where('invoice_number', 'like', "%{$term}%")
+                  ->orWhereHas('supplier', fn ($sq) => $sq->where('name', 'like', "%{$term}%"))
+                  ->orWhereHas('items.product', fn ($pq) => $pq->where('name', 'like', "%{$term}%"));
+            });
+        }
+
         return $query->latest()->paginate($perPage);
     }
 

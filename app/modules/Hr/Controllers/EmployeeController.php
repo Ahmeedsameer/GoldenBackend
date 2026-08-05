@@ -124,6 +124,48 @@ class EmployeeController extends Controller
         ]);
     }
 
+    /**
+     * POST /api/hr/employees/{id}/end-employment/preview — read-only Final
+     * Settlement breakdown for the admin to review before confirming.
+     * Persists nothing (see EmployeeService::previewSettlement).
+     */
+    public function previewEndEmployment(Request $request, string $id)
+    {
+        $data = $request->validate([
+            'type'         => 'required|in:resigned,terminated',
+            'leaving_date' => 'required|date',
+        ]);
+
+        $employee = User::whereIn('role', ['manager', 'sales'])->findOrFail($id);
+        $result   = $this->employees->previewSettlement($employee, $data['type'], $data['leaving_date']);
+
+        return response()->json(['message' => 'ok', 'data' => $result]);
+    }
+
+    /**
+     * PUT /api/hr/employees/{id}/end-employment — resignation or termination.
+     * Updates employment_status, saves the leaving date, and computes the
+     * Final Settlement (see EmployeeService::endEmployment) — the same
+     * breakdown previewEndEmployment() above already showed the admin. Does
+     * NOT touch the account's active/inactive status — that remains a
+     * separate step (toggleStatus above), now unblocked once this has run.
+     */
+    public function endEmployment(Request $request, string $id)
+    {
+        $data = $request->validate([
+            'type'         => 'required|in:resigned,terminated',
+            'leaving_date' => 'required|date',
+        ]);
+
+        $employee = User::whereIn('role', ['manager', 'sales'])->findOrFail($id);
+        $result   = $this->employees->endEmployment($employee, $data['type'], $data['leaving_date']);
+
+        return response()->json([
+            'message' => 'تم إنهاء خدمة الموظف وحساب المستحقات النهائية بنجاح',
+            'data'    => $result,
+        ]);
+    }
+
     private function currentPeriod(): array
     {
         $now = Carbon::now();

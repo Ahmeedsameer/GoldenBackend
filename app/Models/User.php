@@ -36,6 +36,9 @@ class User extends Authenticatable implements JWTSubject
         'personal_commission_percent',
         'hire_date',
         'status',
+        'employment_status',
+        'leaving_date',
+        'final_settlement_amount',
         'monthly_leave_allowance',
         'hr_notes',
     ];
@@ -61,6 +64,8 @@ class User extends Authenticatable implements JWTSubject
             'email_verified_at'           => 'datetime',
             'password'                    => 'hashed',
             'hire_date'                   => 'date',
+            'leaving_date'                => 'date',
+            'final_settlement_amount'     => 'decimal:2',
             'base_salary'                 => 'decimal:2',
             'personal_commission_percent' => 'decimal:2',
             'monthly_leave_allowance'      => 'integer',

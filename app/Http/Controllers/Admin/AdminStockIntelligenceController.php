@@ -112,6 +112,7 @@ class AdminStockIntelligenceController extends Controller
 
         $typeCounts = \App\Models\Product::query()
             ->where('is_active', true)
+            ->notArchived()
             ->whereIn('product_type', [
                 \App\Models\Product::TYPE_RAW_MATERIAL,
                 \App\Models\Product::TYPE_PACKAGING,

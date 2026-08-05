@@ -67,6 +67,7 @@ class PricingService
                 Product::TYPE_COMPOUND, Product::TYPE_READY_PRODUCT,
                 Product::TYPE_RAW_MATERIAL, Product::TYPE_PACKAGING,
             ])
+            ->notArchived()
             ->with('category.productType:id,pricing_source')
             ->search($search)
             ->orderBy('name')
@@ -359,6 +360,7 @@ class PricingService
     {
         $products = Product::query()
             ->where('product_type', Product::TYPE_READY_PRODUCT)
+            ->notArchived()
             ->with('category.productType:id,pricing_source')
             ->get(['id', 'name', 'sku', 'selling_price', 'priced_cost', 'category_id']);
 

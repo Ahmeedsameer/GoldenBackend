@@ -23,6 +23,8 @@ class ProductResource extends JsonResource
             'barcode' => $this->barcode,
             'scalar' => $this->scalar,
             'is_active' => (bool) $this->is_active,
+            'is_archived' => (bool) $this->is_archived,
+            'archived_at' => $this->archived_at,
             'selling_price' => $this->selling_price,
             'price_per_gram' => $this->price_per_gram,
             'purchase_cost' => $this->purchase_cost,

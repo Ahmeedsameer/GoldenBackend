@@ -93,16 +93,35 @@ class StockMovementService
     private function unionSql(): string
     {
         $parts = [
-            // Purchases — the ORIGINAL warehouse-landing Goods row only (shop_id IS NULL),
-            // so a batch later transferred to N shops is never counted as N purchases.
+            // Purchases — ONE row per supply_item, never N rows for a batch later
+            // transferred to N shops. Prefers the original warehouse-landing Goods
+            // row (shop_id IS NULL) when one exists; falls back to that
+            // supply_item's own earliest Goods row when it doesn't. That fallback
+            // matters: some supply_items (verified — 195 of 309 in this dataset,
+            // mostly from historical/seeded "opening stock" at a branch) were
+            // stocked directly into a shop with NO warehouse leg at all. The old
+            // query's unconditional `g.shop_id IS NULL` join silently dropped every
+            // one of these purchases from the audit entirely — no inflow was ever
+            // recorded for them, so every later sale against that stock understated
+            // the running balance, which is exactly why old/new quantity showed up
+            // negative in the report despite real stock never having gone negative.
+            // `g.shop_id` (not a hardcoded NULL) also now correctly attributes the
+            // purchase to wherever it actually landed, so it nets against sales in
+            // the SAME (product, shop) balance instead of a warehouse group that
+            // may have no other activity for that product at all.
             "SELECT sup.date as movement_date, 'purchase' as movement_type,
                     CONCAT('SUP-', sup.id) as reference_number, si.id as source_id,
-                    si.product_id as product_id, NULL as shop_id, NULL as source_shop_id, NULL as destination_shop_id,
+                    si.product_id as product_id, g.shop_id as shop_id, NULL as source_shop_id, NULL as destination_shop_id,
                     si.quantity as quantity_in, 0 as quantity_out, si.unit_price as unit_cost,
                     (si.quantity * si.unit_price) as total_value, NULL as user_id, NULL as notes
              FROM supply_items si
              JOIN supplies sup ON sup.id = si.supply_id
-             JOIN goods g ON g.supply_item_id = si.id AND g.shop_id IS NULL",
+             JOIN goods g ON g.id = (
+                 SELECT g2.id FROM goods g2
+                 WHERE g2.supply_item_id = si.id
+                 ORDER BY (g2.shop_id IS NULL) DESC, g2.date ASC, g2.id ASC
+                 LIMIT 1
+             )",
 
             // Sales — every invoice_items row already represents real consumption of its
             // own product_id (oil/bottle sub-lines included), see Phase 3B compound-usage.

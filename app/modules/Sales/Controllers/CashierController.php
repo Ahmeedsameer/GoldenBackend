@@ -40,6 +40,34 @@ class CashierController extends Controller
     }
 
     /**
+     * Barcode-scanner lookup — GET /api/sales/goods/barcode?code=1234567890123
+     * EXACT match only (barcode, then SKU), never product name — see
+     * SalesService::findGoodsByCode(). Distinct 'ambiguous' vs 'not_found'
+     * statuses so the frontend can show the right message for each.
+     */
+    public function findGoodsByBarcode()
+    {
+        $seller = auth()->user();
+        $code   = (string) request('code', '');
+
+        if (! $seller->shop_id) {
+            return response()->json(['message' => 'البائع غير مرتبط بأي فرع'], 422);
+        }
+        if (trim($code) === '') {
+            return response()->json(['message' => 'الرجاء إدخال الباركود', 'status' => 'not_found', 'data' => null], 422);
+        }
+
+        $shopId = app(\App\Modules\Hr\Services\ActiveBranchService::class)->activeBranchId($seller) ?? (int) $seller->shop_id;
+        $result = $this->salesService->findGoodsByCode($shopId, $code);
+
+        return response()->json([
+            'message' => 'ok',
+            'status'  => $result['status'],
+            'data'    => $result['goods'],
+        ]);
+    }
+
+    /**
      * Products that have a saved recipe — for the compose modal's recipe search.
      * GET /api/sales/composable-products?search=عطر
      */
@@ -222,20 +250,48 @@ class CashierController extends Controller
     }
 
     /**
-     * Search customers by phone number.
-     * GET /api/sales/customers?phone=055&per_page=20
+     * Search customers by name OR phone.
+     * GET /api/sales/customers?search=محمد&per_page=20
      */
     public function searchCustomers()
     {
-        $phone   = request('phone');
+        // 'search' is the real param; 'phone' kept as a fallback for any
+        // caller still on the old phone-only contract.
+        $term    = request('search', request('phone'));
         $perPage = request()->integer('per_page', 20);
 
-        $customers = $this->salesService->searchCustomers($phone, $perPage);
+        $customers = $this->salesService->searchCustomers($term, $perPage);
 
         return response()->json([
             'message' => 'تم جلب قائمة العملاء بنجاح',
             'data'    => $customers,
         ]);
+    }
+
+    /**
+     * Quick-create a customer from inside the cashier, without submitting an
+     * invoice — reuses the exact same firstOrCreate-by-phone rule the normal
+     * checkout flow already uses (see SalesService::createCustomer()).
+     * POST /api/sales/customers { name, phone, email?, address? }
+     */
+    public function createCustomer()
+    {
+        $data = request()->validate([
+            'name'    => 'required|string|max:255',
+            'phone'   => 'required|string|max:32',
+            'email'   => 'nullable|email|max:255',
+            'address' => 'nullable|string|max:255',
+        ]);
+
+        $seller = auth()->user();
+        $shopId = app(\App\Modules\Hr\Services\ActiveBranchService::class)->activeBranchId($seller) ?? (int) $seller->shop_id;
+
+        $customer = $this->salesService->createCustomer($data, $shopId);
+
+        return response()->json([
+            'message' => 'تم حفظ بيانات العميل بنجاح',
+            'data'    => $customer,
+        ], 201);
     }
 
     public function searchTesters()

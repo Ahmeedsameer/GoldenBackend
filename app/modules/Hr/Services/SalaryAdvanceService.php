@@ -119,6 +119,9 @@ class SalaryAdvanceService
                 'reviewed_by' => $actor->id,
                 'reviewed_at' => now(),
                 'paying_safe_id' => $safe->id,
+                // Defaults to the disbursement safe — changeable afterward for
+                // future installments only, see changeDefaultSafe() below.
+                'default_repayment_safe_id' => $safe->id,
             ]);
 
             foreach ($rows as $row) {
@@ -265,6 +268,24 @@ class SalaryAdvanceService
 
             return $advance->fresh(['installments', 'repayments']);
         });
+    }
+
+    /**
+     * Change which Safe FUTURE installment repayments (and the pre-filled
+     * default on the early-repayment form) land in. Never touches any
+     * historical SalaryAdvanceRepayment/SafeTransaction row — those keep
+     * whichever safe was actually chosen for them at the time.
+     */
+    public function changeDefaultSafe(SalaryAdvance $advance, int $safeId, User $actor): SalaryAdvance
+    {
+        $safe = Safe::where('is_active', true)->findOrFail($safeId);
+        $before = ['default_repayment_safe_id' => $advance->default_repayment_safe_id];
+
+        $advance->update(['default_repayment_safe_id' => $safe->id]);
+
+        $this->audit->log('advance.default_safe_changed', $advance, $before, ['default_repayment_safe_id' => $safe->id]);
+
+        return $advance->fresh();
     }
 
     /**

@@ -10,42 +10,58 @@ use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use App\Http\Services\UserManagmentService;
+use App\Modules\Hr\Services\EmployeeService;
 
 class UsersManagmentController extends Controller
 {
-    
 
-    public function __construct(private UserManagmentService $userManagmentService)
+
+    public function __construct(
+        private UserManagmentService $userManagmentService,
+        private EmployeeService $employees,
+    )
     {
-       
-       
+
+
     }
 
-    
+
 
 
     // This page is scoped to Admin accounts only — other roles (manager, sales) are
     // managed separately under HR > الموظفون (see EmployeeController).
+    // Deactivated accounts (status = inactive) are hidden by default, exactly like
+    // EmployeeController::index() — pass ?status=inactive to see only deactivated
+    // admin accounts ("Show Inactive Users").
     public function index()
     {
         $query = User::query()->where('role', 'admin');
 
         if (request()->has('name')) {
-            $query->where('name', 'like', '%' . request('name') . '%');
+            $term = request('name');
+            $query->where(function ($q) use ($term) {
+                $q->where('name', 'like', "%{$term}%")
+                  ->orWhere('email', 'like', "%{$term}%");
+            });
         }
 
         if (request()->has('email')) {
             $query->where('email', 'like', '%' . request('email') . '%');
         }
 
+        $status = request('status', 'active');
+        if (in_array($status, ['active', 'inactive'], true)) {
+            $query->where('status', $status);
+        }
+
         $limit = 20;
-        
+
         if (request()->has('limit')) {
             $limit = request('limit');
         }
 
         $users = $query->paginate($limit);
-        
+
 
         return response()->json($users);
     }
@@ -193,5 +209,31 @@ class UsersManagmentController extends Controller
     public function destroy(string $id)
     {
         //
+    }
+
+    /**
+     * PUT /api/user-managment/{id}/toggle-status — deactivate/reactivate an
+     * admin account. Never deletes the row: flips the same `status` column
+     * EmployeeController::toggleStatus() already uses for manager/sales
+     * accounts, reusing that exact service method (no duplicated logic).
+     * A deactivated account can no longer log in (see AuthController::login())
+     * and any already-issued token is rejected on the next request (see
+     * CheckRole middleware) — but every historical record it authored
+     * (invoices, audit logs, approvals, ...) is untouched.
+     */
+    public function toggleStatus(string $id)
+    {
+        $user = User::where('role', 'admin')->findOrFail($id);
+
+        if ($user->id === auth()->id()) {
+            return response()->json(['message' => 'لا يمكنك إلغاء تفعيل حسابك الخاص'], 422);
+        }
+
+        $user = $this->employees->toggleStatus($user);
+
+        return response()->json([
+            'message' => 'تم تغيير حالة الحساب بنجاح',
+            'data'    => ['id' => $user->id, 'status' => $user->status],
+        ]);
     }
 }

@@ -152,6 +152,28 @@ class SalaryAdvanceController extends Controller
         return response()->json(['message' => 'تم تسجيل السداد المبكر', 'data' => $advance]);
     }
 
+    /** PUT /api/hr/advances/{id}/default-safe — admin only; changes where FUTURE installments land. */
+    public function changeDefaultSafe(Request $request, string $id)
+    {
+        $advance = SalaryAdvance::where('status', SalaryAdvance::ACTIVE)->findOrFail($id);
+        $data = $request->validate(['safe_id' => ['required', 'integer', 'exists:safes,id']]);
+
+        $advance = $this->advances->changeDefaultSafe($advance, (int) $data['safe_id'], $request->user());
+
+        return response()->json(['message' => 'تم تغيير الخزنة الافتراضية للأقساط القادمة', 'data' => $advance]);
+    }
+
+    /** GET /api/hr/advances/{id}/transactions — every SafeTransaction linked to this advance (disbursement + repayments). */
+    public function transactions(string $id)
+    {
+        $advance = SalaryAdvance::findOrFail($id);
+        $rows = \App\Models\SafeTransaction::where('salary_advance_id', $advance->id)
+            ->with(['safe.shop:id,name', 'safe.safeType:id,name', 'user:id,name'])
+            ->latest()->get();
+
+        return response()->json(['message' => 'ok', 'data' => $rows]);
+    }
+
     private function validatePlan(Request $request, bool $requireApprovedAmount = true): array
     {
         return $request->validate([

@@ -25,6 +25,7 @@ class SafeTransaction extends Model
         'supplier_payment_refund'  => 'in',
         'bank_charge'              => 'out',
         'bank_charge_reversal'     => 'in',
+        'salary_payment'           => 'out',
     ];
 
     protected $fillable = [
@@ -41,6 +42,7 @@ class SafeTransaction extends Model
         'supplier_payment_id',
         'invoice_payment_id',
         'payment_method_id',
+        'payroll_id',
         'user_id',
     ];
 
@@ -79,6 +81,11 @@ class SafeTransaction extends Model
     public function supplierPayment(): BelongsTo
     {
         return $this->belongsTo(SupplierPayment::class);
+    }
+
+    public function payroll(): BelongsTo
+    {
+        return $this->belongsTo(Payroll::class);
     }
 
     /** The exact payment LINE that generated this transaction — disambiguates which of an invoice's several payment lines this row belongs to (Safe History traceability). */

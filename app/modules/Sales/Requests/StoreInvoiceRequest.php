@@ -64,8 +64,14 @@ class StoreInvoiceRequest extends FormRequest
             'items'              => ['required', 'array', 'min:1'],
             'items.*.product_id' => ['required', 'integer', 'exists:products,id'],
             'items.*.quantity'   => ['required', 'numeric', 'min:0.001'],
-            // Manual per-line unit price (cashier can override the configured price).
-            'items.*.price'      => ['nullable', 'numeric', 'min:0'],
+            // Manual per-line unit price (cashier can override the configured
+            // price) — required for every line in "Manual Total" mode, since
+            // that mode has no other price source (no auto-config, no batch
+            // override, no distribution).
+            'items.*.price'      => [
+                Rule::requiredIf(fn () => $this->input('pricing_mode') === 'global'),
+                'nullable', 'numeric', 'min:0',
+            ],
 
             // Compose-dialog tagging only (display grouping) — never affects
             // pricing/FIFO. Both null for every normal/legacy line.
@@ -146,6 +152,7 @@ class StoreInvoiceRequest extends FormRequest
             'items.*.quantity.required'       => 'الكمية مطلوبة لكل صنف',
             'items.*.quantity.numeric'        => 'الكمية يجب أن تكون رقماً',
             'items.*.quantity.min'            => 'الكمية يجب أن تكون أكبر من صفر',
+            'items.*.price.required'          => 'يجب إدخال سعر يدوي لكل صنف في وضع الإجمالي اليدوي.',
         ];
     }
 }

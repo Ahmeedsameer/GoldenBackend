@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\LeaveRequest;
 use Illuminate\Support\Facades\Auth;
 use App\Http\Controllers\Controller;
 
@@ -29,6 +30,36 @@ class AuthController extends Controller
         // return response()->json($credentials);
         if (! $token = auth()->attempt($credentials)) {
             return response()->json(['error' => 'Unauthorized'], 401);
+        }
+
+        // Deactivated accounts (status = inactive, see users.status) authenticate
+        // correctly against their password but must never receive a token —
+        // same status flag EmployeeController::toggleStatus() already uses.
+        if (auth()->user()->status === 'inactive') {
+            auth()->logout();
+
+            return response()->json(['error' => 'هذا الحساب معطّل. يرجى التواصل مع المسؤول.'], 403);
+        }
+
+        // Leave Lock — a seller on an approved leave covering today never gets
+        // a token, same "authenticate correctly but never issue" shape as the
+        // inactive-account check above. Purely date-driven: once the leave's
+        // end_date passes, login works again with no admin action needed.
+        if (auth()->user()->role === 'sales') {
+            $leave = LeaveRequest::where('user_id', auth()->id())
+                ->where('status', LeaveRequest::APPROVED)
+                ->whereDate('start_date', '<=', today())
+                ->whereDate('end_date', '>=', today())
+                ->first();
+
+            if ($leave) {
+                auth()->logout();
+
+                return response()->json([
+                    'error'      => "هذا الموظف في إجازة معتمدة حتى {$leave->end_date->toDateString()}",
+                    'error_code' => 'on_leave',
+                ], 403);
+            }
         }
 
         return $this->respondWithToken($token);

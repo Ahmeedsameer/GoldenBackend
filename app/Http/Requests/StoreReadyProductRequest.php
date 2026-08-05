@@ -27,6 +27,7 @@ class StoreReadyProductRequest extends CreateProductRequest
     {
         return [
             'name'              => ['required', 'string', 'max:255', new NoHtmlTags()],
+            'image'             => 'nullable|image|mimes:jpeg,png,jpg,gif,svg|max:2048',
             'barcode'           => 'nullable|string|max:100',
             'is_active'         => 'nullable|in:true,false,1,0',
             // Piece, or weighed by gram/kilogram — kilogram is normalized to

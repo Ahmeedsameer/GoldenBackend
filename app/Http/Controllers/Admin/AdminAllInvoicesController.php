@@ -27,6 +27,7 @@ class AdminAllInvoicesController extends Controller
         $dateFrom = $request->get('date_from');
         $dateTo   = $request->get('date_to');
         $perPage  = min((int) $request->get('per_page', 25), 100);
+        $search   = trim((string) $request->get('search', ''));
 
         $rows = new Collection();
 
@@ -38,6 +39,15 @@ class AdminAllInvoicesController extends Controller
         }
         if ($type === 'all' || $type === 'internal_transfer') {
             $rows = $rows->merge($this->internalTransferRows($dateFrom, $dateTo));
+        }
+
+        if ($search !== '') {
+            $needle = mb_strtolower($search);
+            $rows = $rows->filter(function ($row) use ($needle) {
+                return str_contains(mb_strtolower((string) $row['number']), $needle)
+                    || str_contains(mb_strtolower((string) ($row['party'] ?? '')), $needle)
+                    || str_contains(mb_strtolower((string) ($row['party_phone'] ?? '')), $needle);
+            });
         }
 
         $rows = $rows->sortByDesc('timestamp')->values();
@@ -68,7 +78,7 @@ class AdminAllInvoicesController extends Controller
     private function salesRows(?string $from, ?string $to): Collection
     {
         $q = Invoice::with([
-            'customer:id,name', 'seller:id,name', 'shop:id,name',
+            'customer:id,name,phone', 'seller:id,name', 'shop:id,name',
             'payments:id,invoice_id,processing_fee_amount',
             'items:id,invoice_id,product_id,goods_id,quantity,price',
             'items.goods.supplyItem:id,unit_price',
@@ -90,13 +100,14 @@ class AdminAllInvoicesController extends Controller
                 'time'         => optional($inv->created_at)->toDateTimeString(),
                 'timestamp'    => optional($inv->created_at ?? $inv->date)->timestamp,
                 'party'        => $inv->customer?->name ?? 'زبون عابر',
+                'party_phone'  => $inv->customer?->phone,
                 'branch'       => $inv->shop?->name,
                 'created_by'   => $inv->seller?->name,
                 'amount'       => (float) $inv->total_amount,
                 'status'       => $inv->status,
                 'status_label' => ['pending' => 'قيد المراجعة', 'approved' => 'مقبولة', 'cancelled' => 'ملغاة'][$inv->status] ?? $inv->status,
                 'is_cancelled' => $inv->status === 'cancelled',
-                'link'         => "/dashboard/pending-invoices",
+                'link'         => "/dashboard/invoices/{$inv->id}",
                 // Report-only fields — never printed on the invoice itself.
                 'bank_fee'     => round($bankFee, 2),
                 'total_cost'   => round($totalCost, 2),

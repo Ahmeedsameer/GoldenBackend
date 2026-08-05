@@ -28,6 +28,16 @@ class WasteController extends Controller
         if ($request->filled('from') && $request->filled('to')) {
             $q->whereBetween('date', [$request->get('from'), $request->get('to')]);
         }
+        if ($request->filled('search')) {
+            $term = $request->get('search');
+            $q->where(function ($sq) use ($term) {
+                $sq->where('id', 'like', "%{$term}%")
+                   ->orWhereHas('product', function ($pq) use ($term) {
+                       $pq->where('name', 'like', "%{$term}%")
+                          ->orWhere('sku', 'like', "%{$term}%");
+                   });
+            });
+        }
 
         $perPage = min((int) $request->get('per_page', 25), 100);
         $result = $q->orderByDesc('date')->orderByDesc('id')->paginate($perPage);

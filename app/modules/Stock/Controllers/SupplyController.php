@@ -19,6 +19,7 @@ class SupplyController extends Controller
             'payment_method',
             'date_from',
             'date_to',
+            'search',
         ]);
         $perPage = request()->integer('per_page', 15);
 

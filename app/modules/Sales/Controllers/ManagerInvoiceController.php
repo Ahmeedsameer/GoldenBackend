@@ -28,6 +28,7 @@ class ManagerInvoiceController extends Controller
             'shop_id'   => $request->user()->shop_id,
             'date_from' => $request->get('date_from'),
             'date_to'   => $request->get('date_to'),
+            'search'    => $request->get('search'),
         ];
         $invoices = $this->salesService->getInvoicesForAdmin($filters, $request->integer('per_page', 15));
 

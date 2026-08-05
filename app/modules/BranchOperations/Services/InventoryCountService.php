@@ -85,12 +85,16 @@ class InventoryCountService
         return $session->fresh();
     }
 
-    public function setItemReason(InventoryCountSession $session, int $itemId, string $reason): InventoryCountItem
+    /** $reasonType is additive/optional — existing callers passing only $reason keep working unchanged. */
+    public function setItemReason(InventoryCountSession $session, int $itemId, string $reason, ?string $reasonType = null): InventoryCountItem
     {
         $this->assertStatus($session, InventoryCountSession::STATUS_REVIEW);
 
         $item = $session->items()->findOrFail($itemId);
-        $item->update(['reason' => $reason]);
+        $item->update(array_filter([
+            'reason' => $reason,
+            'reason_type' => $reasonType,
+        ], fn ($v) => $v !== null));
 
         return $item;
     }
@@ -98,7 +102,7 @@ class InventoryCountService
     public function approve(InventoryCountSession $session, User $user): InventoryCountSession
     {
         $this->assertStatus($session, InventoryCountSession::STATUS_REVIEW);
-        $session->update(['status' => InventoryCountSession::STATUS_APPROVED, 'approved_at' => now()]);
+        $session->update(['status' => InventoryCountSession::STATUS_APPROVED, 'approved_at' => now(), 'approved_by' => $user->id]);
 
         return $session->fresh();
     }

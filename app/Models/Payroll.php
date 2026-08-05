@@ -37,6 +37,9 @@ class Payroll extends Model
         'half_days',
         'unpaid_leave_days',
         'status',
+        'paying_safe_id',
+        'paid_by',
+        'paid_at',
         'is_locked',
         'locked_by',
         'locked_at',
@@ -59,6 +62,7 @@ class Payroll extends Model
         'generated_at'                => 'datetime',
         'is_locked'                   => 'boolean',
         'locked_at'                   => 'datetime',
+        'paid_at'                     => 'datetime',
     ];
 
     public function user(): BelongsTo
@@ -74,5 +78,16 @@ class Payroll extends Model
     public function lines(): HasMany
     {
         return $this->hasMany(PayrollLine::class);
+    }
+
+    /** Which Safe/Custody actually paid this salary out — chosen by the admin at payment time. */
+    public function payingSafe(): BelongsTo
+    {
+        return $this->belongsTo(Safe::class, 'paying_safe_id');
+    }
+
+    public function paidBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'paid_by');
     }
 }

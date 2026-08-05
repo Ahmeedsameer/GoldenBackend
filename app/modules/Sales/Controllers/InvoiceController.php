@@ -17,7 +17,7 @@ class InvoiceController extends Controller
      */
     public function index()
     {
-        $filters = request()->only(['status', 'date_from', 'date_to']);
+        $filters = request()->only(['status', 'date_from', 'date_to', 'search']);
         $perPage = request()->integer('per_page', 15);
 
         $invoices = $this->salesService->getSellerInvoices(

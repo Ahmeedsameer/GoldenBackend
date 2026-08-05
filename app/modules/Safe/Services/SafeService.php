@@ -3,6 +3,7 @@
 namespace App\Modules\Safe\Services;
 
 use App\Models\Invoice;
+use App\Models\Payroll;
 use App\Models\Safe;
 use App\Models\SafeBalance;
 use App\Models\SalaryAdvance;
@@ -398,6 +399,23 @@ class SafeService
         return $this->applyTransaction($safe, 'supplier_payment_refund', $currencyId, $amount, $userId, null, $note, null, null, null, $payment->id, null, $paymentMethodId);
     }
 
+    // ── Salary Payment (Payroll) ───────────────────────────────────────────────
+    // The admin picks WHICH Safe pays a salary out — same pattern as Salary
+    // Advance disbursement / Supplier Payment. Called from inside
+    // PayrollService::pay()'s own DB::transaction, so this does not self-wrap.
+
+    public function recordSalaryPayment(
+        Safe    $safe,
+        Payroll $payroll,
+        int     $currencyId,
+        float   $amount,
+        int     $userId,
+        ?string $note = null
+    ): SafeTransaction {
+        $this->guardAgainstOverdraft($safe->id, $currencyId, $amount);
+        return $this->applyTransaction($safe, 'salary_payment', $currencyId, $amount, $userId, null, $note, null, null, null, null, null, null, $payroll->id);
+    }
+
     // ── Private: core write ───────────────────────────────────────────────────
 
     private function applyTransaction(
@@ -413,7 +431,8 @@ class SafeService
         ?int    $salaryAdvanceId   = null,
         ?int    $supplierPaymentId = null,
         ?int    $invoicePaymentId  = null,
-        ?int    $paymentMethodId   = null
+        ?int    $paymentMethodId   = null,
+        ?int    $payrollId         = null
     ): SafeTransaction {
         $direction = SafeTransaction::DIRECTION_MAP[$type];
 
@@ -433,6 +452,7 @@ class SafeService
             'supplier_payment_id'  => $supplierPaymentId,
             'invoice_payment_id'   => $invoicePaymentId,
             'payment_method_id'    => $paymentMethodId,
+            'payroll_id'           => $payrollId,
             'user_id'              => $userId,
         ]);
     }

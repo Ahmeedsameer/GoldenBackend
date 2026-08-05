@@ -16,6 +16,7 @@ use App\Models\Shop;
 use App\Models\User;
 use App\Modules\Safe\Services\SafeService;
 use App\Modules\Hr\Services\ActiveBranchService;
+use App\Modules\Sales\Services\SalesAuditLogger;
 use App\Modules\Stock\Services\InventoryAlertService;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -25,6 +26,7 @@ class SalesService
     public function __construct(
         private SafeService $safeService,
         private InventoryAlertService $inventoryAlerts,
+        private SalesAuditLogger $salesAuditLogger,
     ) {}
     // ── Frontend utility: search available goods in seller's shop ─────────────
 
@@ -37,6 +39,10 @@ class SalesService
                 'supplyItem.product.category.productType:id,sold_by,pricing_source,default_unit',
             ])
             ->where('shop_id', $shopId);
+
+        // Archived products never appear in the cashier's stock browse,
+        // regardless of whether a search term was typed.
+        $query->whereHas('supplyItem.product', fn ($q) => $q->notArchived());
 
         if ($search) {
             // Reuse the single Product::scopeSearch matcher (name / sku / barcode)
@@ -59,6 +65,68 @@ class SalesService
         $this->decorateWithStockLevel($goods->getCollection(), $shopId);
 
         return $goods;
+    }
+
+    /**
+     * Barcode-scanner lookup — EXACT match only, barcode first then SKU
+     * (falls back to SKU only when no barcode matches — some scanners are
+     * pointed at a SKU label instead of a real barcode). Deliberately never
+     * matches product name, unlike searchGoods()'s general fuzzy multi-field
+     * search: a scanner sends a precise code, so a loose partial/name match
+     * here would risk silently adding the wrong product to a live sale.
+     *
+     * @return array{status: 'found'|'not_found'|'ambiguous', goods: ?Goods}
+     *   'ambiguous' — more than one product shares this exact code (a data
+     *   problem elsewhere in the catalog) — caller must not add anything.
+     *   'not_found' — no product has this code, OR it does but has none of
+     *   this stock in $shopId — both are indistinguishable "can't sell this"
+     *   states from the cashier's point of view.
+     */
+    public function findGoodsByCode(int $shopId, string $code): array
+    {
+        $code = trim($code);
+        if ($code === '') {
+            return ['status' => 'not_found', 'goods' => null];
+        }
+
+        $productIds = Product::where('barcode', $code)->notArchived()->pluck('id');
+        if ($productIds->isEmpty()) {
+            $productIds = Product::where('sku', $code)->notArchived()->pluck('id');
+        }
+
+        if ($productIds->isEmpty()) {
+            return ['status' => 'not_found', 'goods' => null];
+        }
+        if ($productIds->count() > 1) {
+            return ['status' => 'ambiguous', 'goods' => null];
+        }
+
+        // Deliberately NOT filtered to current_quantity > 0 here — a product
+        // that IS stocked at this shop but is fully depleted must still come
+        // back as 'found' (with product_shop_stock = 0), so the cashier gets
+        // the existing "out of stock" UX (isOutOfStock()/exceedsStock()) —
+        // exactly like a catalog card click — instead of a misleading
+        // "barcode not found" for a product that genuinely exists here.
+        $goods = Goods::query()
+            ->with([
+                'supplyItem.product:id,name,sku,barcode,scalar,category_id,selling_price,price_per_gram',
+                'supplyItem.product.category:id,name,minimum_sell_price,price_per_gram,is_fixed,value_percentage,product_type_id',
+                'supplyItem.product.category.productType:id,sold_by,pricing_source,default_unit',
+            ])
+            ->where('shop_id', $shopId)
+            ->whereHas('supplyItem', fn ($q) => $q->where('product_id', $productIds->first()))
+            ->orderByDesc('current_quantity')
+            ->orderBy('date')->orderBy('id')
+            ->first();
+
+        if (! $goods) {
+            // Product exists in the catalog but has never been stocked at this shop.
+            return ['status' => 'not_found', 'goods' => null];
+        }
+
+        $this->decorateWithStockLevel(collect([$goods]), $shopId);
+
+        return ['status' => 'found', 'goods' => $goods];
     }
 
     /** Compute per-product shop stock + level for a collection of Goods rows. */
@@ -150,6 +218,7 @@ class SalesService
 
         return Product::query()
             ->where('is_active', true)
+            ->notArchived()
             ->search($search)   // single reusable matcher (name / sku / barcode)
             // Exclude any product that already has an inventory row in this shop
             // (those are returned by searchGoods and are sellable).
@@ -165,17 +234,53 @@ class SalesService
             ->get(['id', 'name', 'sku', 'scalar']);
     }
 
-    // ── Frontend utility: search customers by phone ────────────────────────────
+    // ── Cashier: search customers by name OR phone ─────────────────────────────
+    // Was phone-only; widened so the cashier can look a customer up by either
+    // field (matches the same name-OR-phone shape already used by invoice
+    // search — see getInvoicesForAdmin()/getSellerInvoices()).
 
-    public function searchCustomers(?string $phone, int $perPage): mixed
+    public function searchCustomers(?string $term, int $perPage): mixed
     {
         $query = Customer::query();
 
-        if ($phone) {
-            $query->where('phone', 'like', "%{$phone}%");
+        if ($term) {
+            $query->where(fn ($q) => $q->where('name', 'like', "%{$term}%")
+                ->orWhere('phone', 'like', "%{$term}%"));
         }
 
         return $query->latest()->paginate($perPage);
+    }
+
+    /**
+     * Cashier: quick-create a customer without leaving the checkout flow.
+     * Same firstOrCreate-by-phone identity rule createInvoice() already uses
+     * for the auto-created walk-in customer — reused here, not duplicated —
+     * so a customer created this way and one auto-created at checkout can
+     * never collide into two rows for the same phone number.
+     */
+    public function createCustomer(array $data, ?int $shopId = null): Customer
+    {
+        $customer = Customer::firstOrCreate(
+            ['phone' => $data['phone']],
+            [
+                'name'    => $data['name'],
+                'email'   => $data['email'] ?? null,
+                'address' => $data['address'] ?? null,
+                'shop_id' => $shopId,
+            ],
+        );
+
+        if ($customer->wasRecentlyCreated) {
+            $this->salesAuditLogger->log(
+                'customer_created',
+                $customer,
+                null,
+                $customer->only(['name', 'phone', 'email', 'address']),
+                $customer->id,
+            );
+        }
+
+        return $customer;
     }
 
     // ── Frontend utility: search testers in the same shop ─────────────────────
@@ -239,8 +344,18 @@ class SalesService
             if (! empty($data['phone']) || ! empty($data['name'])) {
                 $customer = Customer::firstOrCreate(
                     ['phone' => $data['phone']],
-                    ['name'  => $data['name']]
+                    ['name' => $data['name'], 'shop_id' => $activeShopId]
                 );
+
+                if ($customer->wasRecentlyCreated) {
+                    $this->salesAuditLogger->log(
+                        'customer_created',
+                        $customer,
+                        null,
+                        $customer->only(['name', 'phone', 'email', 'address']),
+                        $customer->id,
+                    );
+                }
             }
 
             // ── 2. Load products with full category data ──────────────────────
@@ -276,6 +391,12 @@ class SalesService
             // deduction. Role sub-lines (compound oil/bottle components) are
             // real inventory draws too and remain fully covered here — only
             // their PRICE (not their stock) comes from the Builder.
+            // "Manual Total" mode: the cashier prices every line by hand, so a
+            // batch with no Pricing-Management selling_price yet is no longer
+            // a blocker — it only ever gated the batch-priced auto-resolution
+            // path below, which this mode skips entirely (see processItem()).
+            $manualPricing = ($data['pricing_mode'] ?? 'auto') === 'global';
+
             $requestedByProduct = [];
             foreach ($data['items'] as $item) {
                 $pid = (int) $item['product_id'];
@@ -284,7 +405,7 @@ class SalesService
 
             foreach ($requestedByProduct as $pid => $requested) {
                 $product     = $products[$pid] ?? null;
-                $batchPriced = $product?->isBatchPriced() ?? false;
+                $batchPriced = ! $manualPricing && ($product?->isBatchPriced() ?? false);
 
                 $available = (float) $this->fifoBatchesQuery($pid, $activeShopId, $batchPriced)->sum('current_quantity');
 
@@ -371,7 +492,7 @@ class SalesService
 
             // ── 7. Process each item — FIFO batch splitting + deduction ───────
             foreach ($items as $item) {
-                $this->processItem($invoice, $item, $products);
+                $this->processItem($invoice, $item, $products, $manualPricing);
             }
 
             // ── 8. Resolve the safe ───────────────────────────────────────────
@@ -487,12 +608,22 @@ class SalesService
             );
         }
 
+        if ($result['invoice']->customer_id) {
+            $this->salesAuditLogger->log(
+                'invoice_created',
+                $result['invoice'],
+                null,
+                ['total_amount' => $result['invoice']->total_amount, 'status' => $result['invoice']->status],
+                $result['invoice']->customer_id,
+            );
+        }
+
         return $result;
     }
 
     // ── Deduct inventory across FIFO batches, split InvoiceItem per batch ─────
 
-    private function processItem(Invoice $invoice, array $item, \Illuminate\Support\Collection $products): void
+    private function processItem(Invoice $invoice, array $item, \Illuminate\Support\Collection $products, bool $manualPricing = false): void
     {
         $productId       = (int) $item['product_id'];
         $needed          = (float) $item['quantity'];
@@ -503,7 +634,10 @@ class SalesService
 
         $product       = $products[$productId] ?? null;
         $parentProduct = $parentProductId ? ($products[$parentProductId] ?? null) : null;
-        $batchPriced   = $product?->isBatchPriced() ?? false;
+        // "Manual Total" mode: the cashier's price always wins, even for
+        // batch-priced products — see priceInvoiceItems() for the matching
+        // skip on the upfront resolution pass.
+        $batchPriced   = ! $manualPricing && ($product?->isBatchPriced() ?? false);
 
         // Fetch all batches with stock for this product in the seller's shop,
         // ordered oldest-first (FIFO) and locked for the transaction. For
@@ -783,6 +917,13 @@ class SalesService
             if (! empty($item['role'])) {
                 continue; // compound component sub-lines price from the Builder's own reference cost
             }
+            // "Manual Total" mode: the cashier explicitly re-prices every line
+            // by hand, for every product type — batch pricing must never
+            // silently override that (unlike a normal 'auto' sale, where a
+            // batch-priced product always bills at its real FIFO price).
+            if (($data['pricing_mode'] ?? 'auto') === 'global') {
+                continue;
+            }
             $product = $products[$item['product_id']] ?? null;
             if ($product && $product->isBatchPriced()) {
                 [$avgPrice, ] = $this->quoteBatchPriceSplit($product->id, $shopId, (float) $item['quantity']);
@@ -791,12 +932,18 @@ class SalesService
         }
         unset($item);
 
-        // Explicit Global-Total mode: the cashier can always fall back to the
-        // legacy global-total workflow on demand (legacy products / special
-        // cases), even when items happen to be configured.
+        // "Manual Total" mode: every line's price is provided directly by the
+        // cashier (StoreInvoiceRequest requires it) — no distribution, no
+        // batch/auto override. Line total = qty × price; invoice total = Σ.
         if (($data['pricing_mode'] ?? 'auto') === 'global') {
-            $total = (float) ($data['total_amount'] ?? 0);
-            return [$this->distributeGlobalTotal($total, $items, $products), round($total, 2)];
+            $total = 0.0;
+            foreach ($items as &$item) {
+                $item['price'] = (float) ($item['price'] ?? 0);
+                $total        += (float) $item['quantity'] * $item['price'];
+            }
+            unset($item);
+
+            return [$items, round($total, 2)];
         }
 
         // Manual per-line prices: when the cashier provides a price for every
@@ -992,6 +1139,23 @@ class SalesService
             $query->whereDate('date', '<=', $filters['date_to']);
         }
 
+        // Search by invoice number, customer name, or customer phone — same
+        // matcher as getInvoicesForAdmin() above, reused here for the seller's
+        // own invoice list.
+        if (! empty($filters['search'])) {
+            $term = trim((string) $filters['search']);
+            $id   = preg_replace('/\D/', '', $term);
+            $query->where(function ($q) use ($term, $id) {
+                if ($id !== '') {
+                    $q->orWhere('id', $id);
+                }
+                $q->orWhereHas('customer', function ($cq) use ($term) {
+                    $cq->where('name', 'like', "%{$term}%")
+                       ->orWhere('phone', 'like', "%{$term}%");
+                });
+            });
+        }
+
         return $query->latest()->paginate($perPage);
     }
 
@@ -1000,6 +1164,7 @@ class SalesService
     {
         return Product::query()
             ->where('is_active', true)
+            ->notArchived()
             ->has('components')
             ->search($search)
             ->orderBy('name')
@@ -1055,6 +1220,7 @@ class SalesService
     {
         $products = Product::query()
             ->where('is_active', true)
+            ->notArchived()
             ->where('show_in_catalog', true)
             ->with(['category:id,minimum_sell_price,product_type_id', 'category.productType:id,sold_by,pricing_source,default_unit'])
             ->search($search)
@@ -1089,7 +1255,7 @@ class SalesService
 
         return $products->map(fn ($p) => [
             'id' => $p->id, 'name' => $p->name, 'sku' => $p->sku, 'barcode' => $p->barcode,
-            'image' => $p->image, 'product_type' => $p->product_type,
+            'image' => $p->image ? asset('storage/' . $p->image) : null, 'product_type' => $p->product_type,
             'configured_unit_price' => $p->product_type === Product::TYPE_READY_PRODUCT ? $this->resolveConfiguredUnitPrice($p, $shopId) : null,
             'shop_stock' => $p->product_type === Product::TYPE_READY_PRODUCT ? (float) ($stocks[$p->id] ?? 0) : null,
             'unit' => $p->scalar,
@@ -1133,13 +1299,14 @@ class SalesService
     {
         $products = Product::query()
             ->where('is_active', true)
+            ->notArchived()
             ->where('product_type', Product::TYPE_RAW_MATERIAL)
             ->whereHas('category.productType', fn ($q) => $q->where('pricing_source', 'category'))
             ->with(['category:id,minimum_sell_price,product_type_id', 'category.productType:id,sold_by,pricing_source,default_unit'])
             ->search($search)
             ->orderBy('name')
             ->limit($limit)
-            ->get(['id', 'name', 'sku', 'scalar', 'category_id', 'price_per_gram']);
+            ->get(['id', 'name', 'sku', 'scalar', 'category_id', 'price_per_gram', 'image']);
 
         return $this->decorateForBuilder($products, $shopId);
     }
@@ -1149,13 +1316,14 @@ class SalesService
     {
         $products = Product::query()
             ->where('is_active', true)
+            ->notArchived()
             ->where('product_type', Product::TYPE_PACKAGING)
             ->whereNotNull('capacity_ml')
             ->with(['category:id,minimum_sell_price,product_type_id', 'category.productType:id,sold_by,pricing_source,default_unit'])
             ->search($search)
             ->orderBy('capacity_ml')
             ->limit($limit)
-            ->get(['id', 'name', 'sku', 'scalar', 'category_id', 'selling_price', 'capacity_ml']);
+            ->get(['id', 'name', 'sku', 'scalar', 'category_id', 'selling_price', 'capacity_ml', 'image']);
 
         return $this->decorateForBuilder($products, $shopId);
     }
@@ -1180,6 +1348,7 @@ class SalesService
             'name'                  => $p->name,
             'sku'                   => $p->sku,
             'unit'                  => $p->scalar,
+            'image'                 => $p->image ? asset('storage/' . $p->image) : null,
             'capacity_ml'           => $p->capacity_ml !== null ? (float) $p->capacity_ml : null,
             'configured_unit_price' => $this->resolveConfiguredUnitPrice($p, $shopId),
             'shop_stock'            => (float) ($stocks[$p->id] ?? 0),
@@ -1277,6 +1446,7 @@ class SalesService
     {
         $products = Product::query()
             ->where('is_active', true)
+            ->notArchived()
             ->where('product_type', Product::TYPE_RAW_MATERIAL)
             ->whereHas('category', fn ($q) => $q->where('name', 'كحول'))
             ->with(['category:id,minimum_sell_price,product_type_id', 'category.productType:id,sold_by,pricing_source,default_unit'])
@@ -1314,6 +1484,23 @@ class SalesService
         }
         if (! empty($filters['date_to'])) {
             $query->whereDate('date', '<=', $filters['date_to']);
+        }
+
+        // Search by invoice number, customer name, or customer phone — same
+        // matcher shape as AdminAllInvoicesController's "كل الفواتير" search,
+        // reused here for Manager/Seller invoice lists instead of a new endpoint.
+        if (! empty($filters['search'])) {
+            $term = trim((string) $filters['search']);
+            $id   = preg_replace('/\D/', '', $term); // digits only, e.g. "INV-73" → "73"
+            $query->where(function ($q) use ($term, $id) {
+                if ($id !== '') {
+                    $q->orWhere('id', $id);
+                }
+                $q->orWhereHas('customer', function ($cq) use ($term) {
+                    $cq->where('name', 'like', "%{$term}%")
+                       ->orWhere('phone', 'like', "%{$term}%");
+                });
+            });
         }
 
         // Cost/profit/fee summary reused from Invoice's accessors (same figures as the
@@ -1403,6 +1590,14 @@ class SalesService
                 'cancelled_by'         => $user->id,
                 'cancellation_reason'  => $reason,
             ]);
+
+            $this->salesAuditLogger->log(
+                'invoice_cancelled',
+                $invoice,
+                null,
+                ['reason' => $reason],
+                $invoice->customer_id,
+            );
 
             return $invoice->fresh([
                 'customer', 'seller:id,name', 'shop:id,name', 'cancelledBy:id,name',

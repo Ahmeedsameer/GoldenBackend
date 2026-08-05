@@ -17,7 +17,7 @@ class InventoryCountSession extends Model
     public const STATUS_COMPLETED = 'completed';
 
     protected $fillable = [
-        'shop_id', 'created_by', 'status', 'notes', 'reviewed_at', 'approved_at', 'completed_at',
+        'shop_id', 'created_by', 'status', 'notes', 'reviewed_at', 'approved_at', 'approved_by', 'completed_at',
     ];
 
     protected $casts = [
@@ -34,6 +34,11 @@ class InventoryCountSession extends Model
     public function createdByUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function approvedByUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'approved_by');
     }
 
     public function employees(): BelongsToMany

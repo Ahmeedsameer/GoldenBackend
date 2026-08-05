@@ -101,13 +101,21 @@ class ProductController extends Controller
         // Accept the modern `search` param (used by the Supply screen and others)
         // and the legacy `name` param. Search matches product name, SKU or
         // barcode so any eligible product is findable regardless of what the
-        // user types. There are no hidden filters (no is_active / soft-delete /
-        // type gating) — every product is searchable unless `active_only` is set.
+        // user types. There are no hidden filters (no is_active / type gating)
+        // — every product is searchable unless `active_only` is set.
         // Single reusable matcher (name / sku / barcode, case-insensitive, partial).
         $query->search(request('search', request('name')));
 
         if (request()->boolean('active_only')) {
             $query->where('is_active', true);
+        }
+
+        // Archived products are hidden from the default (normal) view — the
+        // Admin-only "Archived Products" filter opts in via ?archived=1.
+        if (request()->boolean('archived')) {
+            $query->whereNotNull('archived_at');
+        } else {
+            $query->notArchived();
         }
 
         // Opt-in filters — default behavior (every product, every type) is
@@ -154,6 +162,7 @@ class ProductController extends Controller
     {
         $products = Product::query()
             ->where('is_active', true)
+            ->notArchived()
             ->where('product_type', Product::TYPE_RAW_MATERIAL)
             ->whereHas('category.productType', fn ($q) => $q->where('pricing_source', 'category'))
             ->search(request('search'))
@@ -230,10 +239,29 @@ class ProductController extends Controller
     }
 
     /**
-     * Remove the specified resource from storage.
+     * Archive a product — never a physical delete. Historical data (invoices,
+     * supplies, FIFO batches, reports, counts) reference products by ID and
+     * must keep working forever, so the row is simply hidden from every
+     * browse/search/pick surface (see Product::scopeNotArchived()) rather than
+     * removed. Admin-only (see routes/api.php).
      */
-    public function destroy(string $id)
+    public function archive(string $id)
     {
-        //
+        $product = Product::findOrFail($id);
+        // forceFill(), not update() — archived_at is deliberately excluded from
+        // $fillable so it can never be mass-assigned via the generic product
+        // update form; this explicit action is the only place it's ever set.
+        $product->forceFill(['archived_at' => now()])->save();
+
+        return response()->json(['message' => 'تمت أرشفة المنتج بنجاح', 'data' => new ProductResource($product)]);
+    }
+
+    /** Restore an archived product — reappears everywhere it was hidden from. */
+    public function restore(string $id)
+    {
+        $product = Product::findOrFail($id);
+        $product->forceFill(['archived_at' => null])->save();
+
+        return response()->json(['message' => 'تمت استعادة المنتج بنجاح', 'data' => new ProductResource($product)]);
     }
 }

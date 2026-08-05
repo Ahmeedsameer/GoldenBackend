@@ -52,6 +52,13 @@ class TransferRequestController extends Controller
                 $sq->where('source_shop_id', $shopId)->orWhere('destination_shop_id', $shopId);
             });
         }
+        if ($request->filled('search')) {
+            $term = $request->get('search');
+            $q->where(function ($sq) use ($term) {
+                $sq->where('request_number', 'like', "%{$term}%")
+                   ->orWhereHas('items.product', fn ($pq) => $pq->where('name', 'like', "%{$term}%"));
+            });
+        }
         // Stock Requests view — every transfer sourced FROM the Main Warehouse
         // (i.e. every Stock Request, whether created via the dedicated
         // storeStockRequest() entry point or an ordinary warehouse-source

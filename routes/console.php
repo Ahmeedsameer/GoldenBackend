@@ -16,3 +16,8 @@ Schedule::command('hr:attendance-alerts')->dailyAt('20:00');
 
 // HR — notify employees + admins about salary-advance installments due this month.
 Schedule::command('hr:notify-due-advances')->monthlyOn(1, '06:00');
+
+// HR — auto-generate payroll for every active employee for the just-completed
+// month. Runs after the advance-due-reminder above so a due installment is
+// already visible before that month's payroll folds its deduction in.
+Schedule::command('hr:generate-monthly-payroll')->monthlyOn(1, '00:30');

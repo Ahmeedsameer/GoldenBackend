@@ -236,6 +236,7 @@ class RequiredMaterialsService
 
         $products = Product::query()
             ->where('is_active', true)
+            ->notArchived()
             ->where('product_type', '!=', Product::TYPE_COMPOUND)
             ->with('category:id,name')
             ->get(['id', 'name', 'category_id', 'scalar', 'product_type', 'selling_price', 'price_per_gram', 'default_selling_price', 'priced_cost', 'priced_at', 'warning_quantity', 'critical_quantity']);
