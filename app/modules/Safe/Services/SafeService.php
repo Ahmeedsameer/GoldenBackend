@@ -293,6 +293,33 @@ class SafeService
         return $this->applyTransaction($safe, 'refund', $currencyId, $amount, $userId, null, $note, $invoice->id, null, null, null, $invoicePaymentId, $paymentMethodId);
     }
 
+    // ── Invoice Edit workflow (SalesService::editInvoice()) ───────────────────
+
+    /** The edited invoice's new total is HIGHER than the original — the customer paid more; credit the difference. */
+    public function recordInvoiceAdjustmentIn(
+        Safe    $safe,
+        Invoice $invoice,
+        int     $currencyId,
+        float   $amount,
+        int     $userId,
+        ?string $note = null,
+    ): SafeTransaction {
+        return $this->applyTransaction($safe, 'invoice_adjustment_in', $currencyId, $amount, $userId, null, $note, $invoice->id);
+    }
+
+    /** The edited invoice's new total is LOWER than the original — money is owed back to the customer; debit the difference. */
+    public function recordInvoiceAdjustmentOut(
+        Safe    $safe,
+        Invoice $invoice,
+        int     $currencyId,
+        float   $amount,
+        int     $userId,
+        ?string $note = null,
+    ): SafeTransaction {
+        $this->guardAgainstOverdraft($safe->id, $currencyId, $amount);
+        return $this->applyTransaction($safe, 'invoice_adjustment_out', $currencyId, $amount, $userId, null, $note, $invoice->id);
+    }
+
     // ── Card/bank processing fee (Payment Methods Phase 2) ────────────────────
     // The fee must participate in accounting as a real, visible expense — not
     // just a smaller credit. Called right after recordSaleTransaction() credits

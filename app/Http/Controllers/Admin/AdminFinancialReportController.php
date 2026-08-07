@@ -28,6 +28,8 @@ class AdminFinancialReportController extends Controller
         'manager_deposit', 'manager_expense',
         'bank_charge', 'bank_charge_reversal',
         'salary_payment',
+        // Invoice Edit workflow's cash difference (SalesService::editInvoice()).
+        'invoice_adjustment_in', 'invoice_adjustment_out',
     ];
 
     /** GET /api/admin/reports/financial/export?format=pdf|excel — the safe-transaction ledger for the period. */

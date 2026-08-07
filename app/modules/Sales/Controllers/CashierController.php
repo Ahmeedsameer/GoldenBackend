@@ -84,14 +84,27 @@ class CashierController extends Controller
      * recipe. Powers the new "sell a perfume" browser, separate from the
      * generic add-item search so raw materials never surface here.
      * GET /api/sales/catalog-products?search=Sauvage
+     * GET /api/sales/catalog-products?search=Sauvage&shop_id=3 — admin only,
+     * browses a specific branch's catalog (e.g. Edit Invoice reconstructing a
+     * sale exactly as it looked in the branch that originally made it).
+     * Manager/seller can never override their own branch this way, even if
+     * the frontend sent a shop_id — enforced here, not just hidden in the UI.
      */
     public function catalogProducts()
     {
-        $seller = auth()->user();
-        if (! $seller->shop_id) {
-            return response()->json(['message' => 'البائع غير مرتبط بأي فرع'], 422);
+        $user = auth()->user();
+
+        if ($user->role === 'admin') {
+            $shopId = request()->filled('shop_id') ? (int) request('shop_id') : null;
+            if (! $shopId) {
+                return response()->json(['message' => 'يرجى تحديد الفرع أولاً'], 422);
+            }
+        } else {
+            if (! $user->shop_id) {
+                return response()->json(['message' => 'البائع غير مرتبط بأي فرع'], 422);
+            }
+            $shopId = app(\App\Modules\Hr\Services\ActiveBranchService::class)->activeBranchId($user) ?? (int) $user->shop_id;
         }
-        $shopId = app(\App\Modules\Hr\Services\ActiveBranchService::class)->activeBranchId($seller) ?? (int) $seller->shop_id;
 
         return response()->json([
             'message' => 'ok',

@@ -130,7 +130,9 @@ class ProductService{
                 $imagePath = $image->store('products', 'public');
                 $data['image'] = $imagePath;
             }
-            $data['is_active'] = ($data['is_active'] === 'true' || $data['is_active'] === '1') ? true : false;
+            if (isset($data['is_active'])) {
+                $data['is_active'] = in_array($data['is_active'], ['true', '1', 1, true], true);
+            }
             if (isset($data['show_in_catalog'])) {
                 $data['show_in_catalog'] = in_array($data['show_in_catalog'], ['true', '1', 1, true], true);
             }

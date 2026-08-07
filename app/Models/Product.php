@@ -18,6 +18,7 @@ class Product extends Model
         'scalar',
         'category_id',
         'selling_price',
+        'current_display_price',
         'price_per_gram',
         'purchase_cost',
         'warning_quantity',
@@ -61,6 +62,7 @@ class Product extends Model
     protected $casts = [
         'is_active'         => 'boolean',
         'selling_price'     => 'decimal:2',
+        'current_display_price' => 'decimal:2',
         'price_per_gram'    => 'decimal:2',
         'purchase_cost'     => 'decimal:2',
         'warning_quantity'  => 'decimal:3',
@@ -105,19 +107,22 @@ class Product extends Model
     }
 
     /**
-     * Batch-aware pricing applies to any product priced at the product level
-     * (Ready Products, Packaging, and generically any future type flagged the
-     * same way) — NOT oils (priced by weight at the category, pricing_source
-     * = 'category') and NOT Compounds (no real purchase batches; priced
-     * fresh per sale in the Product Builder instead).
+     * Batch-aware pricing applies to every real inventory item — Raw Material
+     * (oils), Packaging, and Ready Products all sell from purchase batches
+     * (SupplyItem) with their own immutable per-batch price — NOT Compounds
+     * (no real purchase batches of their own; priced fresh per sale in the
+     * Product Builder from the FIFO cost/price of the oil+bottle it consumes).
+     *
+     * `category->productType->pricing_source` ('category' for oil vs 'product'
+     * for everything else) is a SEPARATE, still-meaningful flag: it only
+     * decides which *legacy flat field* a price falls back to when no batch
+     * price is available (SalesService::resolveConfiguredUnitPrice()) —
+     * price_per_gram-style for oil, selling_price-style for everything else.
+     * It no longer decides whether batch pricing applies at all.
      */
     public function isBatchPriced(): bool
     {
-        if ($this->product_type === self::TYPE_COMPOUND) {
-            return false;
-        }
-
-        return $this->category?->productType?->pricing_source === ProductType::PRICING_SOURCE_PRODUCT;
+        return $this->product_type !== self::TYPE_COMPOUND;
     }
 
     /** BOM components (recipe) — this product is composed of these. */

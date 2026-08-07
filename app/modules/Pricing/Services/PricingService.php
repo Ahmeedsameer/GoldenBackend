@@ -8,6 +8,7 @@ use App\Models\Product;
 use App\Models\Supply;
 use App\Models\SupplyItem;
 use App\Models\User;
+use App\Modules\Sales\Services\SalesService;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -30,6 +31,35 @@ use Illuminate\Support\Facades\DB;
  */
 class PricingService
 {
+    public function __construct(
+        private SalesService $salesService,
+    ) {}
+
+    // ── Display price cache (Product.current_display_price) ──────────────────
+
+    /**
+     * Re-syncs the read-only Product.current_display_price cache from the
+     * live current-FIFO-price resolver (SalesService::currentWarehouseFifoPrice)
+     * — never computes pricing itself, just persists what the live resolver
+     * already says. Call this at the end of any operation that can change
+     * which batch is oldest-sellable in the warehouse: a sale, a purchase, a
+     * batch being priced/edited/archived, a transfer, an inventory
+     * adjustment, a waste record, or an invoice cancellation.
+     */
+    public function syncDisplayPrice(Product $product): void
+    {
+        if (! $product->isBatchPriced()) {
+            return; // legacy flat-price products never had a live FIFO price to cache
+        }
+
+        $price = $this->salesService->currentWarehouseFifoPrice($product->id);
+        // Avoid an unconditional write on every single sale/purchase when
+        // nothing actually changed — cheap guard, still correct either way.
+        if (round((float) ($product->current_display_price ?? -1), 2) !== round((float) ($price ?? -1), 2)) {
+            $product->update(['current_display_price' => $price]);
+        }
+    }
+
     // ── Cost lookups (read-only, never touches inventory) ────────────────────
 
     public function latestPurchaseCost(int $productId): ?float
@@ -266,6 +296,11 @@ class PricingService
             'current_fifo_price'          => $active['selling_price'] ?? null,
             'next_batch_price'            => $next['selling_price'] ?? null,
             'remaining_in_current_batch'  => $active['remaining_quantity'] ?? null,
+            // Category pricing helpers — for the pricing dialog to pre-fill
+            // (default) and validate against (minimum) client-side, before
+            // the same floor is re-checked authoritatively server-side.
+            'category_minimum_price'      => $product->category?->minimum_sell_price !== null ? (float) $product->category->minimum_sell_price : null,
+            'category_default_price'      => $product->category?->default_selling_price !== null ? (float) $product->category->default_selling_price : null,
         ];
     }
 
@@ -312,6 +347,7 @@ class PricingService
         if ($batch->isPriced()) {
             abort(422, 'هذه الدفعة مُسعَّرة بالفعل — الأسعار التاريخية لا يمكن تعديلها أبداً.');
         }
+        $this->assertPriceMeetsCategoryMinimum($product, $price);
 
         DB::transaction(function () use ($product, $batch, $price, $reason, $admin) {
             $batch->update([
@@ -330,6 +366,63 @@ class PricingService
                 'updated_by'        => $admin->id,
             ]);
         });
+
+        $this->syncDisplayPrice($product);
+    }
+
+    /**
+     * Edits an ALREADY-priced batch's selling price — a distinct capability
+     * from priceBatch() (which stays immutable-on-first-price; its "historical
+     * prices never change" guard is unaffected and still fires if this method
+     * is bypassed). Only ever affects future sales: every InvoiceItem already
+     * created from this batch keeps its own frozen unit_cost/price/line_profit
+     * snapshot regardless (see SalesService::processItem()) — nothing here
+     * touches invoice_items. priced_at/priced_by stay as the batch's original
+     * first-pricing timestamp/user; the new PriceHistory row (with a real
+     * old_selling_price, unlike the first-pricing row which has none) is the
+     * audit trail for "when/who/why this batch's price was edited."
+     */
+    public function updateBatchPrice(Product $product, SupplyItem $batch, float $price, ?string $reason, User $admin): void
+    {
+        if ((int) $batch->product_id !== $product->id) {
+            abort(404, 'الدفعة غير تابعة لهذا المنتج.');
+        }
+        if (! $product->isBatchPriced()) {
+            abort(422, 'هذا المنتج لا يُسعَّر بالدفعة — استخدم تعديل سعر البيع العادي.');
+        }
+        if (! $batch->isPriced()) {
+            abort(422, 'هذه الدفعة لم تُسعَّر بعد — استخدم شاشة التسعير الأولي.');
+        }
+        $this->assertPriceMeetsCategoryMinimum($product, $price);
+
+        $oldPrice = $batch->selling_price !== null ? (float) $batch->selling_price : null;
+
+        DB::transaction(function () use ($product, $batch, $price, $oldPrice, $reason, $admin) {
+            $batch->update(['selling_price' => round($price, 2)]);
+
+            PriceHistory::create([
+                'product_id'        => $product->id,
+                'supply_item_id'    => $batch->id,
+                'old_selling_price' => $oldPrice,
+                'new_selling_price' => round($price, 2),
+                'type'              => PriceHistory::TYPE_BATCH_PRICE_EDIT,
+                'reason'            => $reason,
+                'updated_by'        => $admin->id,
+            ]);
+        });
+
+        $this->syncDisplayPrice($product);
+    }
+
+    /** Shared by priceBatch()/updateBatchPrice() — the category minimum is the
+     *  floor for a batch's selling price, exactly as it already is for the
+     *  legacy flat-price engines (SalesService's distribution step 5). */
+    private function assertPriceMeetsCategoryMinimum(Product $product, float $price): void
+    {
+        $minimum = $product->category?->minimum_sell_price;
+        if ($minimum !== null && round($price, 2) < round((float) $minimum, 2)) {
+            abort(422, 'لا يمكن أن يكون سعر بيع الدفعة أقل من الحد الأدنى لسعر بيع الفئة.');
+        }
     }
 
     /**
@@ -351,6 +444,7 @@ class PricingService
         }
 
         $batch->update(['archived_at' => now()]);
+        $this->syncDisplayPrice($product);
     }
 
     // ── "Update Prices" — Ready Products only, admin-triggered, cost-only ────
@@ -472,7 +566,10 @@ class PricingService
         $row = $this->rowFor($product);
 
         if ($product->isBatchPriced()) {
-            $row['batches'] = $this->listBatches($product)['batches'];
+            $batchSummary = $this->listBatches($product);
+            $row['batches'] = $batchSummary['batches'];
+            $row['category_minimum_price'] = $batchSummary['category_minimum_price'];
+            $row['category_default_price'] = $batchSummary['category_default_price'];
             return $row;
         }
 

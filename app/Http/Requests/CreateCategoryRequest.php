@@ -46,6 +46,11 @@ class CreateCategoryRequest extends FormRequest
             'minimum_sell_price'  => [$pricesAtCategory ? 'required' : 'nullable', 'numeric', 'min:0'],
             'price_per_gram'      => 'nullable|numeric|min:0',
 
+            // Auto-fill/validation floor for batch pricing (see PricingService::priceBatch) —
+            // never the real selling price of anything, so it applies to every category
+            // regardless of pricing_source.
+            'default_selling_price' => ['nullable', 'numeric', 'min:0', 'gte:minimum_sell_price'],
+
             // is_fixed is derived from the Product Type in the service (not the client).
             'is_fixed'            => 'nullable|boolean',
             'value_percentage'    => 'nullable|numeric|min:0|max:100',
@@ -68,6 +73,9 @@ class CreateCategoryRequest extends FormRequest
                 'minimum_sell_price.required' => 'الحد الأدنى لسعر البيع مطلوب',
                 'minimum_sell_price.numeric'  => 'الحد الأدنى لسعر البيع يجب أن يكون رقماً',
                 'minimum_sell_price.min'      => 'الحد الأدنى لسعر البيع لا يمكن أن يكون سالباً',
+                'default_selling_price.numeric' => 'السعر الافتراضي يجب أن يكون رقماً',
+                'default_selling_price.min'      => 'السعر الافتراضي لا يمكن أن يكون سالباً',
+                'default_selling_price.gte'      => 'السعر الافتراضي لا يمكن أن يكون أقل من الحد الأدنى لسعر البيع',
                 'is_fixed.required'           => 'نوع التسعير مطلوب',
                 'is_fixed.boolean'            => 'نوع التسعير يجب أن يكون صحيح أو خطأ',
                 'value_percentage.numeric'    => 'نسبة القيمة يجب أن تكون رقماً',

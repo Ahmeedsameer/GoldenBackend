@@ -26,6 +26,10 @@ class SafeTransaction extends Model
         'bank_charge'              => 'out',
         'bank_charge_reversal'     => 'in',
         'salary_payment'           => 'out',
+        // Invoice Edit workflow — the cash difference when an edited invoice's
+        // new total differs from its original total (see SalesService::editInvoice()).
+        'invoice_adjustment_in'    => 'in',
+        'invoice_adjustment_out'   => 'out',
     ];
 
     protected $fillable = [

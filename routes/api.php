@@ -118,6 +118,8 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::get('{id}',        [\App\Modules\Sales\Controllers\AdminInvoiceController::class, 'show']);
         Route::put('{id}/status', [\App\Modules\Sales\Controllers\AdminInvoiceController::class, 'updateStatus']);
         Route::post('{id}/cancel', [\App\Modules\Sales\Controllers\AdminInvoiceController::class, 'cancel']);
+        Route::put('{id}/edit', [\App\Modules\Sales\Controllers\AdminInvoiceController::class, 'edit']);
+        Route::put('{id}/edit/preview', [\App\Modules\Sales\Controllers\AdminInvoiceController::class, 'previewEdit']);
     });
 
     // ── Unified cross-module invoice timeline (sales + purchase + internal transfer) ──
@@ -501,6 +503,8 @@ Route::group(['middleware' => ['api', CheckRole::class . ':manager'], 'prefix' =
     Route::get('invoices',              [\App\Modules\Sales\Controllers\ManagerInvoiceController::class, 'index']);
     Route::get('invoices/{id}',         [\App\Modules\Sales\Controllers\ManagerInvoiceController::class, 'show']);
     Route::post('invoices/{id}/cancel', [\App\Modules\Sales\Controllers\ManagerInvoiceController::class, 'cancel']);
+    Route::put('invoices/{id}/edit',    [\App\Modules\Sales\Controllers\ManagerInvoiceController::class, 'edit']);
+    Route::put('invoices/{id}/edit/preview', [\App\Modules\Sales\Controllers\ManagerInvoiceController::class, 'previewEdit']);
 
     // ── Analytics & reports ───────────────────────────────────────────────────
     Route::get('reports/sales',                [ReportsController::class, 'salesSummary']);
@@ -536,6 +540,7 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 
     Route::post('update/apply',         [PricingController::class, 'applyUpdate']);
     Route::put('{id}/selling-price',    [PricingController::class, 'updateSellingPrice']);
     Route::put('{id}/batches/{supplyItemId}/price', [PricingController::class, 'priceBatch']);
+    Route::patch('{id}/batches/{supplyItemId}/price', [PricingController::class, 'updateBatchPrice']);
     Route::post('{id}/batches/{supplyItemId}/archive', [PricingController::class, 'archiveBatch']);
 });
 
@@ -732,6 +737,8 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 
 Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 'branch-operations/reports/batches'], function () {
     Route::get('summary', [BatchTraceabilityController::class, 'summary']);
     Route::get('export', [BatchTraceabilityController::class, 'export']);
+    Route::get('movements', [BatchTraceabilityController::class, 'movements']);
+    Route::get('movements/export', [BatchTraceabilityController::class, 'movementsExport']);
     Route::get('{supplyItem}', [BatchTraceabilityController::class, 'show']);
     Route::get('', [BatchTraceabilityController::class, 'index']);
 });
@@ -754,7 +761,6 @@ Route::group(['middleware' => ['api', CheckRole::class . ':sales,manager']], fun
         Route::get('goods/barcode', [CashierController::class, 'findGoodsByBarcode']);
         Route::get('unstocked-products', [CashierController::class, 'unstockedProducts']);
         Route::get('composable-products', [CashierController::class, 'composableProducts']);
-        Route::get('catalog-products', [CashierController::class, 'catalogProducts']);
         Route::get('oil-products', [CashierController::class, 'oilProducts']);
         Route::get('bottle-products', [CashierController::class, 'bottleProducts']);
         Route::get('alcohol-products', [CashierController::class, 'alcoholProducts']);
@@ -779,6 +785,15 @@ Route::group(['middleware' => ['api', CheckRole::class . ':sales,manager']], fun
         Route::get('override-requests/{id}',    [OverrideRequestController::class, 'show']);
     });
 
+});
+
+// Sales Catalog — also reachable by admin (with an explicit shop_id), for
+// Edit Invoice reusing the exact same POS catalog scoped to the invoice's
+// original branch. Kept out of the sales,manager group above since every
+// other endpoint there assumes auth()->user()->shop_id exists, which admin
+// never has — role/branch enforcement itself stays inside the controller.
+Route::group(['middleware' => ['api', CheckRole::class . ':sales,manager,admin'], 'prefix' => 'sales'], function () {
+    Route::get('catalog-products', [CashierController::class, 'catalogProducts']);
 });
 
 

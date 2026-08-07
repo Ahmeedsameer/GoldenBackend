@@ -14,6 +14,8 @@ class PriceHistory extends Model
     public const TYPE_PRICE_EDIT   = 'price_edit';
     /** A single Supply Batch (SupplyItem) received its (immutable, one-time) selling price. */
     public const TYPE_BATCH_PRICING = 'batch_pricing';
+    /** An already-priced batch's selling price was edited — future sales only, historical invoices unaffected. */
+    public const TYPE_BATCH_PRICE_EDIT = 'batch_price_edit';
 
     protected $fillable = [
         'product_id',

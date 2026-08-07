@@ -75,6 +75,10 @@ class WasteService
                 ]);
             }
 
+            // Only affects the warehouse-scoped display-price cache when this
+            // waste's shop actually IS the warehouse — a no-op otherwise.
+            app(\App\Modules\Pricing\Services\PricingService::class)->syncDisplayPrice($product);
+
             return $waste;
         });
     }

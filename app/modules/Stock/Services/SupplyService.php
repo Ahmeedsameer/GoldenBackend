@@ -214,9 +214,15 @@ class SupplyService
         });
 
         // Supplies land in the main warehouse (shop_id = null) — refresh alert
-        // state for each supplied product so a resolved shortage clears.
+        // state for each supplied product so a resolved shortage clears, and
+        // re-sync the display-price cache (a new priced-or-not batch can
+        // change which batch is now oldest-sellable).
+        $pricingService = app(\App\Modules\Pricing\Services\PricingService::class);
         foreach (array_unique(array_column($data['items'], 'product_id')) as $pid) {
             $this->alerts->evaluate((int) $pid, null);
+            if ($product = Product::find($pid)) {
+                $pricingService->syncDisplayPrice($product);
+            }
         }
 
         return $supply;
@@ -295,9 +301,11 @@ class SupplyService
                 }
             }
 
+            $pricingService = app(\App\Modules\Pricing\Services\PricingService::class);
             foreach ($supply->items as $item) {
                 $warehouseGoods = $item->goods->firstWhere('shop_id', null);
                 $warehouseGoods?->update(['current_quantity' => 0]);
+                $pricingService->syncDisplayPrice($item->product);
             }
 
             foreach ($supply->payments as $payment) {

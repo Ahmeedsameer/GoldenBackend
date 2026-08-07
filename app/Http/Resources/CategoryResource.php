@@ -21,6 +21,7 @@ class CategoryResource extends JsonResource
             'image'               => $this->image ? asset('storage/' . $this->image) : null,
             'parent_id'           => $this->parent_id,
             'minimum_sell_price'  => $this->minimum_sell_price,
+            'default_selling_price' => $this->default_selling_price,
             'price_per_gram'      => $this->price_per_gram,
             'is_fixed'            => (bool) $this->is_fixed,
             'value_percentage'    => $this->value_percentage,

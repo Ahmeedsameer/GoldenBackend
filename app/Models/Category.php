@@ -15,6 +15,7 @@ class Category extends Model
         'image',
         'parent_id',
         'minimum_sell_price',
+        'default_selling_price',
         'price_per_gram',
         'is_fixed',
         'value_percentage',
@@ -25,6 +26,7 @@ class Category extends Model
 
     protected $casts = [
         'minimum_sell_price'        => 'decimal:2',
+        'default_selling_price'     => 'decimal:2',
         'price_per_gram'            => 'decimal:2',
         'is_fixed'                  => 'boolean',
         'value_percentage'          => 'decimal:2',

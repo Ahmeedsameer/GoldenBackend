@@ -495,6 +495,17 @@ class SalesService
                 $this->processItem($invoice, $item, $products, $manualPricing);
             }
 
+            // Re-sync the display-price cache for every distinct product this
+            // sale touched — once per product (not once per line), and resolved
+            // via the container rather than constructor-injected, since
+            // PricingService itself depends on this service (currentWarehouseFifoPrice).
+            $pricingService = app(\App\Modules\Pricing\Services\PricingService::class);
+            foreach (collect($items)->pluck('product_id')->unique() as $touchedProductId) {
+                if ($product = $products[$touchedProductId] ?? null) {
+                    $pricingService->syncDisplayPrice($product);
+                }
+            }
+
             // ── 8. Resolve the safe ───────────────────────────────────────────
             if (! empty($data['safe_id'])) {
                 $safe = Safe::with('safeType')
@@ -1007,8 +1018,18 @@ class SalesService
         }
 
         if ($type->pricing_source === 'category') {
-            // Oil: price per gram now lives on the product. Falls back to the
-            // (legacy) category price_per_gram so pre-refactor data still sells.
+            // Oil is batch-priced exactly like every other inventory item now —
+            // "configured price" is the current FIFO batch's own selling_price
+            // ("what the customer pays right now"), same as the 'product'
+            // branch below — including returning null (no price, blocks sale)
+            // when the current batch hasn't been priced yet, never silently
+            // falling back to a stale flat price. Falls back to the legacy flat
+            // price_per_gram fields only when there's no shop context at all
+            // (e.g. a Compound Product's own reference-cost lookups without a
+            // sale in progress).
+            if ($product->isBatchPriced() && $shopId !== null) {
+                return $this->currentFifoBatchPrice($product->id, $shopId);
+            }
             if ($product->price_per_gram !== null) {
                 return (float) $product->price_per_gram;
             }
@@ -1036,6 +1057,29 @@ class SalesService
     private function currentFifoBatchPrice(int $productId, int $shopId): ?float
     {
         $goods = $this->fifoBatchesQuery($productId, $shopId, true)->first();
+
+        return $goods?->supplyItem?->selling_price !== null ? (float) $goods->supplyItem->selling_price : null;
+    }
+
+    /**
+     * Public, read-only helper for PricingService::syncDisplayPrice() — the
+     * main warehouse's (Goods.shop_id IS NULL) current FIFO batch price for a
+     * product. Same "oldest priced, in-stock, non-archived batch" rule as
+     * currentFifoBatchPrice()/fifoBatchesQuery(), just scoped to the
+     * warehouse specifically (that method requires a non-null per-branch
+     * $shopId, so it can't express "warehouse" itself).
+     */
+    public function currentWarehouseFifoPrice(int $productId): ?float
+    {
+        $goods = Goods::with('supplyItem')
+            ->whereHas('supplyItem', fn ($q) => $q->where('product_id', $productId)
+                ->whereNull('archived_at')
+                ->whereNotNull('selling_price'))
+            ->whereNull('shop_id')
+            ->where('current_quantity', '>', 0)
+            ->orderBy('date')
+            ->orderBy('id')
+            ->first();
 
         return $goods?->supplyItem?->selling_price !== null ? (float) $goods->supplyItem->selling_price : null;
     }
@@ -1549,6 +1593,15 @@ class SalesService
                 Goods::where('id', $goodsId)->increment('current_quantity', $items->sum('quantity'));
             }
 
+            // Re-sync the display-price cache for every distinct product this
+            // cancellation restored stock to.
+            $pricingService = app(\App\Modules\Pricing\Services\PricingService::class);
+            foreach ($invoice->items->pluck('product_id')->unique() as $restoredProductId) {
+                if ($restoredProduct = Product::find($restoredProductId)) {
+                    $pricingService->syncDisplayPrice($restoredProduct);
+                }
+            }
+
             // 2. Reverse the money — each payment LINE independently, from its own
             //    safe (InvoicePayment.safe_id, per-line since Payment Methods Phase 2),
             //    or the single 'sale' SafeTransaction when a virtual safe was used
@@ -1604,5 +1657,232 @@ class SalesService
                 'items.product:id,name,sku', 'items.parentProduct:id,name', 'payments.currency:id,code',
             ]);
         });
+    }
+
+    // ── Edit Invoice (Admin / Sales Manager only — permission + branch scoping
+    //    is the caller's responsibility, mirroring cancel()'s
+    //    AdminInvoiceController/ManagerInvoiceController split: the controller
+    //    resolves+scopes the Invoice via Eloquent, this method trusts it) ──────
+
+    /**
+     * Restores every existing line to its EXACT original batch (identical to
+     * cancel()'s own restoration step — extracted here so both share one
+     * implementation), then rebuilds the invoice from scratch using the exact
+     * same FIFO/pricing engine a brand-new sale uses (fifoBatchesQuery(),
+     * priceInvoiceItems(), processItem()), so an edited invoice can never
+     * desync from what an equivalent fresh sale would produce — no parallel
+     * pricing/inventory logic. The financial difference (new total − old
+     * total) posts as a single invoice_adjustment_in/out SafeTransaction;
+     * zero difference posts nothing, per spec. Every OTHER invoice's
+     * snapshots stay completely untouched; this invoice's own new
+     * InvoiceItems get fresh, equally-frozen unit_cost/price/line_profit
+     * snapshots exactly like a new sale would — historical accounting
+     * integrity is preserved, not bypassed.
+     *
+     * @param  array{items: array, pricing_mode?: string}  $data
+     * @return array{invoice: Invoice, old_total: float, new_total: float, difference: float}
+     */
+    public function editInvoice(Invoice $invoice, array $data, User $editor, ?int $safeId, ?string $note = null): array
+    {
+        return DB::transaction(function () use ($invoice, $data, $editor, $safeId, $note) {
+            $plan = $this->rebuildInvoiceItems($invoice, $data);
+            $oldTotal = $plan['old_total'];
+            $newTotal = $plan['new_total'];
+
+            // 4. Financial difference → a single adjustment transaction, per spec.
+            $diff = round($newTotal - $oldTotal, 2);
+            if ($diff !== 0.0) {
+                if (! $safeId) {
+                    abort(422, 'يجب اختيار خزنة لتسوية الفرق في قيمة الفاتورة.');
+                }
+                $safe = Safe::findOrFail($safeId);
+                $currencyId = Currency::where('code', 'EGP')->value('id');
+                $adjustNote = "تسوية فرق تعديل الفاتورة رقم {$invoice->id}" . ($note ? " — {$note}" : '');
+
+                if ($diff > 0) {
+                    $this->safeService->recordInvoiceAdjustmentIn($safe, $invoice, $currencyId, $diff, $editor->id, $adjustNote);
+                } else {
+                    $this->safeService->recordInvoiceAdjustmentOut($safe, $invoice, $currencyId, abs($diff), $editor->id, $adjustNote);
+                }
+            }
+
+            // 5. Audit log.
+            $this->salesAuditLogger->log(
+                'invoice_edited',
+                $invoice,
+                ['total' => $oldTotal],
+                ['total' => $newTotal, 'difference' => $diff],
+                $invoice->customer_id,
+            );
+
+            return [
+                'invoice'    => $invoice->fresh([
+                    'customer', 'seller:id,name', 'shop:id,name',
+                    'items.product:id,name,sku', 'items.parentProduct:id,name', 'payments.currency:id,code',
+                ]),
+                'old_total'  => $oldTotal,
+                'new_total'  => $newTotal,
+                'difference' => $diff,
+                'old_lines'  => $plan['old_lines'],
+                'new_lines'  => $plan['new_lines'],
+            ];
+        });
+    }
+
+    /**
+     * Read-only preview of what editInvoice() would produce for this exact
+     * $data payload — runs the IDENTICAL restore→delete→reprice→FIFO-rebuild
+     * steps (rebuildInvoiceItems(), shared with the real save below) inside a
+     * transaction that always rolls back, so the preview can never leave a
+     * trace and can never drift from what a real save actually computes.
+     * Deliberately skips step 4/5 (safe adjustment + audit log) — those are
+     * only meaningful on a committed edit.
+     *
+     * @return array{old_total: float, new_total: float, difference: float, old_lines: array, new_lines: array}
+     */
+    public function previewEditInvoice(Invoice $invoice, array $data): array
+    {
+        if ($invoice->status === 'cancelled') {
+            abort(422, 'لا يمكن تعديل فاتورة ملغاة.');
+        }
+
+        DB::beginTransaction();
+        try {
+            $plan = $this->rebuildInvoiceItems($invoice, $data);
+        } finally {
+            DB::rollBack();
+        }
+
+        $diff = round($plan['new_total'] - $plan['old_total'], 2);
+
+        return [
+            'old_total'  => $plan['old_total'],
+            'new_total'  => $plan['new_total'],
+            'difference' => $diff,
+            'old_lines'  => $plan['old_lines'],
+            'new_lines'  => $plan['new_lines'],
+        ];
+    }
+
+    /**
+     * The actual restore→delete→reprice→FIFO-rebuild engine behind both
+     * editInvoice() (commits) and previewEditInvoice() (always rolls back) —
+     * exists exactly once so a preview can never compute anything differently
+     * than a real save would. Also aggregates old/new per-product lines
+     * (qty + weighted-avg price) for the Edit Invoice UI's before/after table.
+     */
+    private function rebuildInvoiceItems(Invoice $invoice, array $data): array
+    {
+        if ($invoice->status === 'cancelled') {
+            abort(422, 'لا يمكن تعديل فاتورة ملغاة.');
+        }
+
+        $invoice->load('items');
+        $oldTotal = (float) $invoice->total_amount;
+        $shopId   = (int) $invoice->shop_id;
+        $oldLines = $this->aggregateInvoiceLinesByProduct($invoice->items);
+
+        // 1. Restore every existing line to its EXACT original batch —
+        //    same grouping cancel() already uses.
+        foreach ($invoice->items->groupBy('goods_id') as $goodsId => $groupItems) {
+            Goods::where('id', $goodsId)->increment('current_quantity', $groupItems->sum('quantity'));
+        }
+        $previousProductIds = $invoice->items->pluck('product_id')->unique()->all();
+
+        // 2. Old snapshots are gone — about to be rebuilt fresh, exactly
+        //    like a brand-new sale's items, never patched in place.
+        $invoice->items()->delete();
+
+        // 3. Rebuild via the exact same stock-guard + pricing + FIFO
+        //    consumption engine createInvoice() uses (see its own
+        //    numbered comments for the identical logic being mirrored
+        //    here, minus the payment-total/pending-approval steps, which
+        //    don't apply to an admin/manager-initiated edit).
+        $productIds = array_unique(array_merge(
+            array_column($data['items'], 'product_id'),
+            array_filter(array_column($data['items'], 'parent_product_id')),
+        ));
+        $products = Product::with([
+                'category:id,name,minimum_sell_price,price_per_gram,is_fixed,value_percentage,product_type_id',
+                'category.productType:id,is_fixed,sold_by,pricing_source',
+            ])
+            ->whereIn('id', $productIds)
+            ->get()
+            ->keyBy('id');
+
+        $manualPricing = ($data['pricing_mode'] ?? 'auto') === 'global';
+
+        $requestedByProduct = [];
+        foreach ($data['items'] as $item) {
+            $pid = (int) $item['product_id'];
+            $requestedByProduct[$pid] = ($requestedByProduct[$pid] ?? 0) + (float) $item['quantity'];
+        }
+        foreach ($requestedByProduct as $pid => $requested) {
+            $product     = $products[$pid] ?? null;
+            $batchPriced = ! $manualPricing && ($product?->isBatchPriced() ?? false);
+            $available   = (float) $this->fifoBatchesQuery($pid, $shopId, $batchPriced)->sum('current_quantity');
+
+            if ($requested > $available) {
+                $name = $product->name ?? "#{$pid}";
+                $unit = $product->scalar ?? '';
+                $availTxt = rtrim(rtrim(number_format($available, 3, '.', ''), '0'), '.');
+                abort(422, "الكمية المطلوبة من \"{$name}\" أكبر من المتاح حالياً ({$availTxt} {$unit}) في هذا الفرع — قد تكون الدفعات الحالية مختلفة عمّا كانت عليه وقت البيع الأصلي.");
+            }
+        }
+
+        [$items, $newTotal] = $this->priceInvoiceItems($data, $products, $shopId);
+
+        foreach ($items as $item) {
+            $this->processItem($invoice, $item, $products, $manualPricing);
+        }
+
+        $newTotal = round($newTotal, 2);
+        $invoice->update(['total_amount' => $newTotal]);
+        $newLines = $this->aggregateInvoiceLinesByProduct($invoice->items()->get());
+
+        // Re-sync the display-price cache for every product this edit
+        // touched, old and new.
+        $pricingService = app(\App\Modules\Pricing\Services\PricingService::class);
+        $touchedProductIds = array_unique(array_merge($previousProductIds, array_column($items, 'product_id')));
+        foreach ($touchedProductIds as $touchedId) {
+            if ($touchedProduct = $products[$touchedId] ?? Product::find($touchedId)) {
+                $pricingService->syncDisplayPrice($touchedProduct);
+            }
+        }
+
+        return [
+            'old_total' => $oldTotal,
+            'new_total' => $newTotal,
+            'old_lines' => $oldLines,
+            'new_lines' => $newLines,
+        ];
+    }
+
+    /**
+     * Group a set of InvoiceItems by product_id into one row per product —
+     * summed quantity + weighted-average price — for the Edit Invoice UI's
+     * before/after comparison table. Role-tagged compound sub-lines (their
+     * own oil/bottle/alcohol cost lines) are excluded: the table compares
+     * what the customer was charged per catalog product, not internal
+     * component costing.
+     */
+    private function aggregateInvoiceLinesByProduct(\Illuminate\Support\Collection $items): array
+    {
+        return $items
+            ->whereNull('role')
+            ->groupBy('product_id')
+            ->map(function ($group) {
+                $qty       = (float) $group->sum('quantity');
+                $lineTotal = (float) $group->sum(fn ($it) => $it->price * $it->quantity);
+
+                return [
+                    'product_id'   => $group->first()->product_id,
+                    'product_name' => $group->first()->product_name,
+                    'quantity'     => $qty,
+                    'price'        => $qty > 0 ? round($lineTotal / $qty, 4) : 0.0,
+                ];
+            })
+            ->values()
+            ->all();
     }
 }

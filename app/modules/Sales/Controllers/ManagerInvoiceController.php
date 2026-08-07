@@ -4,6 +4,8 @@ namespace App\Modules\Sales\Controllers;
 
 use App\Http\Controllers\Controller;
 use App\Models\Invoice;
+use App\Models\Safe;
+use App\Modules\Sales\Requests\EditInvoiceRequest;
 use App\Modules\Sales\Services\SalesService;
 use Illuminate\Http\Request;
 
@@ -61,6 +63,50 @@ class ManagerInvoiceController extends Controller
         return response()->json([
             'message' => 'تم إلغاء الفاتورة بنجاح، وتمت إعادة المخزون واسترجاع المبلغ',
             'data'    => $cancelled,
+        ]);
+    }
+
+    /**
+     * PUT /api/manager/invoices/{id}/edit — same as the admin edit, but both
+     * the invoice AND the chosen settlement safe must belong to the manager's
+     * own branch (never a shop they merely pick).
+     */
+    public function edit(EditInvoiceRequest $request, string $id)
+    {
+        $invoice = Invoice::where('shop_id', $request->user()->shop_id)->findOrFail($id);
+
+        $safeId = $request->input('safe_id') ? (int) $request->input('safe_id') : null;
+        if ($safeId !== null) {
+            Safe::where('shop_id', $request->user()->shop_id)->findOrFail($safeId);
+        }
+
+        $result = $this->salesService->editInvoice(
+            $invoice,
+            $request->validated(),
+            $request->user(),
+            $safeId,
+            $request->input('note'),
+        );
+
+        return response()->json([
+            'message' => 'تم تعديل الفاتورة بنجاح',
+            'data'    => $result,
+        ]);
+    }
+
+    /**
+     * PUT /api/manager/invoices/{id}/edit/preview — read-only, own branch
+     * only (same shop_id guard as edit()). Runs the same rebuild engine then
+     * rolls back — never mutates stock/pricing/safe balances.
+     */
+    public function previewEdit(EditInvoiceRequest $request, string $id)
+    {
+        $invoice = Invoice::where('shop_id', $request->user()->shop_id)->findOrFail($id);
+        $result  = $this->salesService->previewEditInvoice($invoice, $request->validated());
+
+        return response()->json([
+            'message' => 'ok',
+            'data'    => $result,
         ]);
     }
 }

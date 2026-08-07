@@ -408,6 +408,16 @@ class TransferRequestService
             $transfer->update(['status' => TransferRequest::STATUS_SHIPPED, 'shipped_at' => now()]);
             $transfer->internalInvoice()->update(['reference_value' => round($shippedFifoValue, 2)]);
             $this->log($transfer, $user, 'shipped', $previous, TransferRequest::STATUS_SHIPPED);
+
+            // Shipping out of the main warehouse can change which batch is now
+            // oldest-sellable there — re-sync the display-price cache (a no-op
+            // when the source shop isn't the warehouse).
+            $pricingService = app(\App\Modules\Pricing\Services\PricingService::class);
+            foreach ($transfer->items->pluck('product_id')->unique() as $shippedProductId) {
+                if ($shippedProduct = \App\Models\Product::find($shippedProductId)) {
+                    $pricingService->syncDisplayPrice($shippedProduct);
+                }
+            }
             $this->notify($transfer, 'تم شحن طلب النقل', "تم شحن طلب النقل {$transfer->request_number} — بانتظار الاستلام في {$transfer->destinationShop->name}", 'shipped');
 
             return $transfer->fresh();
@@ -465,6 +475,15 @@ class TransferRequestService
             ]);
             $this->log($transfer, $user, 'received', $previous, TransferRequest::STATUS_RECEIVED, $overallNotes);
             $this->notify($transfer, 'تم استلام طلب النقل', "تم استلام طلب النقل {$transfer->request_number} في {$transfer->destinationShop->name}", 'received');
+
+            // Receiving into the main warehouse can change which batch is now
+            // oldest-sellable there (a no-op when the destination isn't it).
+            $pricingService = app(\App\Modules\Pricing\Services\PricingService::class);
+            foreach ($transfer->items->pluck('product_id')->unique() as $receivedProductId) {
+                if ($receivedProduct = \App\Models\Product::find($receivedProductId)) {
+                    $pricingService->syncDisplayPrice($receivedProduct);
+                }
+            }
 
             return $transfer->fresh();
         });

@@ -4,6 +4,7 @@ namespace App\Modules\Sales\Controllers;
 
 use App\Http\Controllers\Controller;
 use App\Models\Invoice;
+use App\Modules\Sales\Requests\EditInvoiceRequest;
 use App\Modules\Sales\Requests\UpdateInvoiceStatusRequest;
 use App\Modules\Sales\Services\SalesService;
 
@@ -88,6 +89,46 @@ class AdminInvoiceController extends Controller
         return response()->json([
             'message' => 'تم إلغاء الفاتورة بنجاح، وتمت إعادة المخزون واسترجاع المبلغ',
             'data'    => $cancelled,
+        ]);
+    }
+
+    /**
+     * PUT /api/admin/invoices/{id}/edit — restores stock to the original
+     * batches then rebuilds via the same FIFO engine a new sale uses; the
+     * financial difference (if any) posts as a single safe adjustment
+     * transaction. Not shop-scoped: admin can edit any shop's invoice.
+     */
+    public function edit(EditInvoiceRequest $request, string $id)
+    {
+        $invoice = Invoice::findOrFail($id);
+        $result = $this->salesService->editInvoice(
+            $invoice,
+            $request->validated(),
+            $request->user(),
+            $request->input('safe_id') ? (int) $request->input('safe_id') : null,
+            $request->input('note'),
+        );
+
+        return response()->json([
+            'message' => 'تم تعديل الفاتورة بنجاح',
+            'data'    => $result,
+        ]);
+    }
+
+    /**
+     * PUT /api/admin/invoices/{id}/edit/preview — read-only: runs the exact
+     * same rebuild engine editInvoice() uses, then rolls back, so the UI can
+     * show old/new totals and per-line prices live as the admin edits,
+     * before committing anything.
+     */
+    public function previewEdit(EditInvoiceRequest $request, string $id)
+    {
+        $invoice = Invoice::findOrFail($id);
+        $result  = $this->salesService->previewEditInvoice($invoice, $request->validated());
+
+        return response()->json([
+            'message' => 'ok',
+            'data'    => $result,
         ]);
     }
 }

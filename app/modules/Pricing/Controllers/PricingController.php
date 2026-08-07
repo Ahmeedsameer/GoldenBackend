@@ -137,6 +137,28 @@ class PricingController extends Controller
         ]);
     }
 
+    /** PATCH /api/pricing/{id}/batches/{supplyItemId}/price — admin only.
+     *  Edits an ALREADY-priced batch's selling price (only affects future
+     *  sales — every past invoice keeps its own frozen price/cost/profit
+     *  snapshot). Distinct from PUT .../price (priceBatch, first-time-only). */
+    public function updateBatchPrice(int $id, int $supplyItemId, Request $request)
+    {
+        $data = $request->validate([
+            'selling_price' => 'required|numeric|min:0.01',
+            'reason' => 'nullable|string|max:255',
+        ]);
+
+        $product = Product::findOrFail($id);
+        $batch = SupplyItem::findOrFail($supplyItemId);
+
+        $this->pricingService->updateBatchPrice($product, $batch, (float) $data['selling_price'], $data['reason'] ?? null, auth()->user());
+
+        return response()->json([
+            'message' => 'تم تعديل سعر الدفعة بنجاح',
+            'data' => $this->pricingService->detailFor($product->fresh()),
+        ]);
+    }
+
     /** POST /api/pricing/{id}/batches/{supplyItemId}/archive — admin only.
      *  Retires a batch from future sale — never a physical delete; see
      *  PricingService::archiveBatch() / Batch Deletion Protection. */
