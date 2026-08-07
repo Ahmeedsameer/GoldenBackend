@@ -43,21 +43,41 @@ class ScheduleService
     }
 
     /**
-     * Build the full weekly roster: one row per employee, one cell per day.
-     *
-     * @param  bool  $onlyPublished  Employee-facing views must never see drafts.
+     * The schedulable-employee query — extracted verbatim from weekRoster()'s
+     * original inline query so the roster grid and the Bulk Shift Assignment
+     * employee picker share exactly one source of truth for "who can be
+     * scheduled" (role IN manager,sales + shop/role/user/status filters).
+     * `search` (name/email/phone) is a new, purely additive filter — every
+     * existing caller (weekRoster, publishWeek, cancelWeek) never sets it, so
+     * their behavior is byte-for-byte unchanged.
      */
-    public function weekRoster(Carbon $from, Carbon $to, array $filters = [], bool $onlyPublished = false): array
+    public function scopedEmployees(array $filters = []): \Illuminate\Support\Collection
     {
-        $employees = User::query()
+        return User::query()
             ->whereIn('role', ['manager', 'sales'])
             ->with('primaryBranch:id,name')
             ->when(! empty($filters['shop_id']), fn ($q) => $q->where('shop_id', (int) $filters['shop_id']))
             ->when(! empty($filters['role']), fn ($q) => $q->where('role', $filters['role']))
             ->when(! empty($filters['user_id']), fn ($q) => $q->where('id', (int) $filters['user_id']))
             ->when(! empty($filters['status']), fn ($q) => $q->where('status', $filters['status']))
+            ->when(! empty($filters['search']), function ($q) use ($filters) {
+                $term = $filters['search'];
+                $q->where(fn ($qq) => $qq->where('name', 'like', "%{$term}%")
+                    ->orWhere('email', 'like', "%{$term}%")
+                    ->orWhere('phone', 'like', "%{$term}%"));
+            })
             ->orderBy('name')
             ->get();
+    }
+
+    /**
+     * Build the full weekly roster: one row per employee, one cell per day.
+     *
+     * @param  bool  $onlyPublished  Employee-facing views must never see drafts.
+     */
+    public function weekRoster(Carbon $from, Carbon $to, array $filters = [], bool $onlyPublished = false): array
+    {
+        $employees = $this->scopedEmployees($filters);
 
         $userIds = $employees->pluck('id')->all();
         $days    = $this->dateRange($from, $to);
@@ -216,6 +236,95 @@ class ScheduleService
         }
 
         return ['saved' => $saved, 'skipped' => $skipped];
+    }
+
+    /**
+     * Bulk Shift Assignment — conflict preview: which of the given employees
+     * already have a schedule_entries row for this date, and what it currently
+     * holds. Read-only, used by the Bulk Shift Assignment modal to show
+     * "N موظفين لديهم شيفت مسجل بالفعل" BEFORE the admin/manager chooses
+     * skip-vs-replace, so nothing is ever silently overwritten.
+     *
+     * @return array<int, array{user_id:int, name:string, type:string, shift_name:?string}>
+     */
+    public function findExistingEntriesForDate(array $userIds, string $date): array
+    {
+        return ScheduleEntry::whereIn('user_id', $userIds)
+            ->where('date', $date)
+            ->with(['user:id,name', 'shiftTemplate:id,name'])
+            ->get()
+            ->map(fn (ScheduleEntry $e) => [
+                'user_id'    => $e->user_id,
+                'name'       => $e->user?->name,
+                'type'       => $e->type,
+                'shift_name' => $e->shiftTemplate?->name,
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Bulk Shift Assignment — assign ONE shift template (type=work, times taken
+     * from the template) to MANY employees on ONE date, in a single atomic
+     * transaction. This is deliberately a SEPARATE method from bulkUpsert():
+     * bulkUpsert() always overwrites (it's "save my staged per-cell edits",
+     * where the admin already saw and chose every value) and has no
+     * skip-vs-replace concept, which this feature explicitly requires
+     * (existing entries are never silently overwritten — see
+     * findExistingEntriesForDate() above). Internally reuses the exact same
+     * transfer-conflict guard (isTransferred) and updateOrCreate pattern as
+     * every other write path in this service, so a bulk-assigned entry is
+     * indistinguishable from one saved through the normal grid editor.
+     *
+     * @return array{assigned:int, skipped_existing:int[], skipped_transferred:int[]}
+     */
+    public function bulkAssignShift(array $userIds, ShiftTemplate $template, string $date, bool $replaceExisting): array
+    {
+        $assigned = 0;
+        $skippedExisting = [];
+        $skippedTransferred = [];
+        $before = [];
+        $after = [];
+
+        DB::transaction(function () use ($userIds, $template, $date, $replaceExisting, &$assigned, &$skippedExisting, &$skippedTransferred, &$before, &$after) {
+            foreach ($userIds as $userId) {
+                if ($this->isTransferred($userId, $date)) {
+                    $skippedTransferred[] = $userId;
+                    continue;
+                }
+
+                $existing = ScheduleEntry::where('user_id', $userId)->where('date', $date)->first();
+                if ($existing && ! $replaceExisting) {
+                    $skippedExisting[] = $userId;
+                    continue;
+                }
+                if ($existing) {
+                    $before[] = ['user_id' => $userId, 'date' => $date, ...$existing->only(['type', 'shift_template_id', 'start_time', 'end_time'])];
+                }
+
+                ScheduleEntry::updateOrCreate(
+                    ['user_id' => $userId, 'date' => $date],
+                    [
+                        'type'              => ScheduleEntry::WORK,
+                        'shift_template_id' => $template->id,
+                        'start_time'        => $template->start_time,
+                        'end_time'          => $template->end_time,
+                        'created_by'        => auth()->id(),
+                    ],
+                );
+                $after[] = ['user_id' => $userId, 'date' => $date, 'shift_template_id' => $template->id];
+                $assigned++;
+            }
+        });
+
+        if ($assigned > 0) {
+            $this->audit->log('schedule.bulk_assigned', null, ['entries' => $before], [
+                'entries' => $after, 'assigned' => $assigned, 'shift_template_id' => $template->id,
+                'date' => $date, 'skipped_existing' => count($skippedExisting), 'skipped_transferred' => count($skippedTransferred),
+            ]);
+        }
+
+        return ['assigned' => $assigned, 'skipped_existing' => $skippedExisting, 'skipped_transferred' => $skippedTransferred];
     }
 
     /**

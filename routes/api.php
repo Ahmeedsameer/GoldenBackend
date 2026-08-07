@@ -841,6 +841,11 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'pre
     Route::get('schedule/export',   [\App\Modules\Hr\Controllers\ScheduleController::class, 'export']);
     Route::get('shift-templates',   [\App\Modules\Hr\Controllers\ScheduleController::class, 'shiftTemplates']);
 
+    // Bulk Shift Assignment — additive only, does not touch any route above
+    Route::get('schedule/bulk-assign/employees',  [\App\Modules\Hr\Controllers\ScheduleController::class, 'assignableEmployees']);
+    Route::get('schedule/bulk-assign/conflicts',  [\App\Modules\Hr\Controllers\ScheduleController::class, 'bulkAssignConflicts']);
+    Route::post('schedule/bulk-assign',           [\App\Modules\Hr\Controllers\ScheduleController::class, 'bulkAssign']);
+
     // Attendance self-history browsing for managers reviewing their own record
     // (the roster endpoint above already covers branch-wide management).
 });

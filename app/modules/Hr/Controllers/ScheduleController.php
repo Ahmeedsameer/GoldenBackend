@@ -100,6 +100,115 @@ class ScheduleController extends Controller
         return response()->json(['message' => $msg, 'data' => $result]);
     }
 
+    // ── Bulk Shift Assignment ────────────────────────────────────────────────
+    // Purely additive on top of the existing single-cell (upsert) and
+    // whole-week (bulkUpsert) save paths above — neither of which is touched.
+    // This lets an admin/manager assign ONE shift to MANY employees on ONE
+    // date from a dedicated modal, with an explicit skip/replace choice for
+    // employees who already have an entry that day (never a silent overwrite).
+
+    /**
+     * GET /api/hr/schedule/bulk-assign/employees?shop_id=&role=&search=
+     * The employee picker's data source — same scoping rule as the roster
+     * grid (scopedFilters() below forces a manager to their own branch),
+     * reusing ScheduleService::scopedEmployees() so "who can be scheduled"
+     * is never computed two different ways in this codebase.
+     */
+    public function assignableEmployees(Request $request)
+    {
+        $filters = $this->scopedFilters($request);
+        if ($request->filled('search')) {
+            $filters['search'] = $request->string('search')->toString();
+        }
+
+        $employees = $this->schedule->scopedEmployees($filters)->map(fn (User $e) => [
+            'id' => $e->id, 'name' => $e->name, 'role' => $e->role,
+            'shop_id' => $e->shop_id, 'primary_branch' => $e->primaryBranch?->name,
+        ]);
+
+        return response()->json(['message' => 'ok', 'data' => $employees->values()]);
+    }
+
+    /**
+     * GET /api/hr/schedule/bulk-assign/conflicts?employee_ids[]=&date=
+     * Read-only preview so the modal can show "N موظفين لديهم شيفت مسجل
+     * بالفعل" and let the admin/manager choose skip vs. replace BEFORE
+     * anything is written — never a silent overwrite.
+     */
+    public function bulkAssignConflicts(Request $request)
+    {
+        $data = $request->validate([
+            'employee_ids'   => ['required', 'array', 'min:1'],
+            'employee_ids.*' => ['integer', 'exists:users,id'],
+            'date'           => ['required', 'date'],
+        ]);
+
+        $this->assertManagerCanEditBulk($request, $data['employee_ids']);
+
+        $conflicts = $this->schedule->findExistingEntriesForDate($data['employee_ids'], $data['date']);
+
+        return response()->json(['message' => 'ok', 'data' => ['conflicts' => $conflicts, 'count' => count($conflicts)]]);
+    }
+
+    /**
+     * POST /api/hr/schedule/bulk-assign
+     * Body: { employee_ids: number[], shift_id: number, date: string, replace_existing?: bool }
+     * ONE endpoint for the whole operation — never one request per employee.
+     * Branch/authorization is re-verified here from the DB regardless of what
+     * the frontend already filtered by (see assertManagerCanEditBulk) — a
+     * tampered request naming an out-of-branch employee is rejected exactly
+     * like the existing bulkUpsert() endpoint already does.
+     */
+    public function bulkAssign(Request $request)
+    {
+        $data = $request->validate([
+            'employee_ids'      => ['required', 'array', 'min:1'],
+            'employee_ids.*'    => ['integer', 'exists:users,id'],
+            'shift_id'          => ['required', 'integer', 'exists:shift_templates,id'],
+            'date'              => ['required', 'date'],
+            'replace_existing'  => ['nullable', 'boolean'],
+        ]);
+
+        $this->assertManagerCanEditBulk($request, $data['employee_ids']);
+
+        $template = ShiftTemplate::findOrFail($data['shift_id']);
+        $result = $this->schedule->bulkAssignShift(
+            $data['employee_ids'],
+            $template,
+            $data['date'],
+            (bool) ($data['replace_existing'] ?? false),
+        );
+
+        $msg = "تم تعيين الشيفت لـ {$result['assigned']} موظف";
+        if (count($result['skipped_existing'])) {
+            $msg .= ' — تم تخطي ' . count($result['skipped_existing']) . ' موظف لديهم شيفت مسجل بالفعل';
+        }
+        if (count($result['skipped_transferred'])) {
+            $msg .= ' — تم تجاهل ' . count($result['skipped_transferred']) . ' موظف ضمن فترة نقل مؤقت';
+        }
+
+        return response()->json(['message' => $msg, 'data' => $result]);
+    }
+
+    /**
+     * Same rule as bulkUpsert()'s inline manager check (line ~84 above) and
+     * assertManagerCanEdit() — re-derives the manager's own branch from the
+     * DB and rejects if ANY requested employee belongs to a different one.
+     * Never trusts a shop_id the client may have sent; always resolves the
+     * employees' real shop_id fresh from the users table.
+     */
+    private function assertManagerCanEditBulk(Request $request, array $employeeIds): void
+    {
+        if ($request->user()->role !== 'manager') {
+            return;
+        }
+        $managed = Shop::where('manager_id', $request->user()->id)->value('id') ?: $request->user()->shop_id;
+        $outside = User::whereIn('id', $employeeIds)->where('shop_id', '!=', $managed)->exists();
+        if ($outside) {
+            abort(403, 'لا يمكنك تعيين شيفت لموظفين خارج فرعك.');
+        }
+    }
+
     /** POST /api/hr/schedule/publish — publish (or re-publish) the week; notifies affected employees. */
     public function publish(Request $request)
     {
