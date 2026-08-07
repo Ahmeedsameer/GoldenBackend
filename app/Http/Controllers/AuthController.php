@@ -46,17 +46,11 @@ class AuthController extends Controller
         // inactive-account check above. Purely date-driven: once the leave's
         // end_date passes, login works again with no admin action needed.
         if (auth()->user()->role === 'sales') {
-            $leave = LeaveRequest::where('user_id', auth()->id())
-                ->where('status', LeaveRequest::APPROVED)
-                ->whereDate('start_date', '<=', today())
-                ->whereDate('end_date', '>=', today())
-                ->first();
-
-            if ($leave) {
+            if ($leaveMessage = LeaveRequest::leaveMessageFor(auth()->id())) {
                 auth()->logout();
 
                 return response()->json([
-                    'error'      => "هذا الموظف في إجازة معتمدة حتى {$leave->end_date->toDateString()}",
+                    'error'      => $leaveMessage,
                     'error_code' => 'on_leave',
                 ], 403);
             }
@@ -72,7 +66,14 @@ class AuthController extends Controller
      */
     public function me()
     {
-        return response()->json(auth()->user());
+        $user         = auth()->user();
+        $leaveMessage = LeaveRequest::leaveMessageFor($user->id);
+
+        return response()->json([
+            ...$user->toArray(),
+            'on_leave_today' => $leaveMessage !== null,
+            'leave_message'  => $leaveMessage,
+        ]);
     }
 
     /**

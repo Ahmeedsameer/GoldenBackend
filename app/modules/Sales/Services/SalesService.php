@@ -8,6 +8,7 @@ use App\Models\Goods;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
 use App\Models\InvoicePayment;
+use App\Models\LeaveRequest;
 use App\Models\PaymentMethod;
 use App\Models\Product;
 use App\Models\Safe;
@@ -309,6 +310,21 @@ class SalesService
     public function createInvoice(array $data): array
     {
         $seller = auth()->user();
+
+        // Leave Lock, sale-creation layer — the ONLY place every invoice
+        // creation flow funnels through (InvoiceController::store() is
+        // currently the sole caller), so this single check covers "any
+        // endpoint" per the business rule without duplicating it per
+        // controller. Deliberately checked BEFORE any read/write below —
+        // nothing is queried or mutated if this aborts. Covers every role
+        // that can reach this method (sales AND manager both sell via the
+        // same POS), unlike CheckRole's broader account-wide lock further
+        // up the stack, which is intentionally scoped to role=sales only
+        // so a manager on leave keeps the rest of their access (branch
+        // ops, reports, HR) — only the act of selling is blocked for them.
+        if ($leaveMessage = LeaveRequest::leaveMessageFor($seller->id)) {
+            abort(403, $leaveMessage);
+        }
 
         if (! $seller->shop_id) {
             abort(422, 'البائع غير مرتبط بأي فرع، يرجى التواصل مع المدير');

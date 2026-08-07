@@ -51,15 +51,9 @@ class CheckRole
         // check above has. Purely date-driven, so access resumes automatically
         // once the leave's end_date passes — nothing to manually re-enable.
         if (auth()->user()->role === 'sales') {
-            $leave = LeaveRequest::where('user_id', auth()->id())
-                ->where('status', LeaveRequest::APPROVED)
-                ->whereDate('start_date', '<=', today())
-                ->whereDate('end_date', '>=', today())
-                ->first();
-
-            if ($leave) {
+            if ($leaveMessage = LeaveRequest::leaveMessageFor(auth()->id())) {
                 return response()->json([
-                    'error'      => "هذا الموظف في إجازة معتمدة حتى {$leave->end_date->toDateString()}",
+                    'error'      => $leaveMessage,
                     'error_code' => 'on_leave',
                 ], 403);
             }
