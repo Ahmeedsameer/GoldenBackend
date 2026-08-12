@@ -2,6 +2,7 @@
 
 namespace App\Modules\Hr\Services;
 
+use App\Models\LeaveCashOut;
 use App\Models\LeaveRequest;
 use App\Models\Shop;
 use App\Models\User;
@@ -50,6 +51,7 @@ class LeaveService
             'end_date'   => $end->toDateString(),
             'days'       => $days,
             'type'       => $data['type'] ?? 'annual',
+            'reason_id'  => $data['reason_id'] ?? null,
             'reason'     => $data['reason'] ?? null,
             'status'     => LeaveRequest::PENDING,
         ]);
@@ -61,26 +63,48 @@ class LeaveService
         return $leave;
     }
 
-    /** Remaining PAID balance for the employee in a given MONTH (resets monthly). */
+    /**
+     * Cumulative (carry-over) leave balance as of a given date — the single
+     * source of truth for both display (section 4/5) and the paid/unpaid
+     * split at approval time. Unused earned leave is never reset to zero
+     * each month: earned-to-date accrues monthlyAccrual × whole months
+     * employed (from hire_date, inclusive of the current month), and only
+     * PAID usage + cash-outs reduce it. `year`/`month` are accepted for
+     * backward compatibility with existing callers but only their combined
+     * date (defaulting to "now") is used — "as of" that date, not a
+     * per-month reset window.
+     */
     public function balance(User $employee, ?int $year = null, ?int $month = null): array
     {
-        $year  ??= (int) now()->year;
-        $month ??= (int) now()->month;
+        $asOf = $year && $month ? Carbon::create($year, $month, 1)->endOfMonth() : now();
 
-        $usedPaid = (int) LeaveRequest::where('user_id', $employee->id)
+        $hireDate = $employee->hire_date ? Carbon::parse($employee->hire_date) : ($employee->created_at ?? $asOf);
+        // Carbon 3's diffInMonths() returns a FLOAT by default — truncate to
+        // whole months employed (a partial current month still counts as 1).
+        $monthsEmployed = max(1, (int) floor($hireDate->diffInMonths($asOf)) + 1);
+        $monthlyAccrual = (float) $employee->monthly_leave_allowance;
+        $earnedToDate = round($monthlyAccrual * $monthsEmployed, 2);
+
+        $usedPaid = (float) LeaveRequest::where('user_id', $employee->id)
             ->where('status', LeaveRequest::APPROVED)
-            ->whereYear('start_date', $year)
-            ->whereMonth('start_date', $month)
+            ->whereDate('start_date', '<=', $asOf->toDateString())
             ->sum('paid_days');
 
-        $allowance = (int) $employee->monthly_leave_allowance;
+        $cashedOut = (float) LeaveCashOut::where('user_id', $employee->id)
+            ->whereDate('date', '<=', $asOf->toDateString())
+            ->sum('days');
+
+        $remaining = round($earnedToDate - $usedPaid - $cashedOut, 2);
 
         return [
-            'year'      => $year,
-            'month'     => $month,
-            'allowance' => $allowance,
-            'used'      => $usedPaid,
-            'remaining' => max(0, $allowance - $usedPaid),
+            'as_of'           => $asOf->toDateString(),
+            'monthly_accrual' => $monthlyAccrual,
+            'earned_to_date'  => $earnedToDate,
+            'used'            => round($usedPaid, 2),
+            'cashed_out'      => round($cashedOut, 2),
+            'remaining'       => max(0.0, $remaining),
+            // Legacy shape kept for existing callers that only read 'allowance'.
+            'allowance'       => $monthlyAccrual,
         ];
     }
 
@@ -90,12 +114,38 @@ class LeaveService
             $employee  = $leave->user;
             $start     = Carbon::parse($leave->start_date);
             $end       = Carbon::parse($leave->end_date);
-            $year      = (int) $start->year;
-            $month     = (int) $start->month;
-            $remaining = $this->balance($employee, $year, $month)['remaining'];
-
-            $paid   = min($leave->days, $remaining);
-            $unpaid = $leave->days - $paid;
+            // Reason-based leave (Admin-configured LeaveReason): the two
+            // flags are independent and BOTH may be on, applied sequentially
+            // — balance is consumed FIRST, and only the days left over (the
+            // excess beyond what the balance could cover) are ever eligible
+            // for a salary deduction. `paid_days` = days covered by the
+            // balance; `unpaid_days` = days NOT covered by the balance (the
+            // excess). PayrollService reads `unpaid_days` — not the raw
+            // `days` — when computing this reason's own salary deduction, so
+            // a day covered by the balance is never ALSO salary-deducted.
+            // If deducts_leave_balance is off, nothing is covered (paid=0)
+            // and every day is "excess" — deducts_salary then decides
+            // whether that excess is actually charged. If deducts_salary is
+            // off, PayrollService's reason-loop simply never reads this
+            // reason's leaves, regardless of how many days are "excess".
+            // Only whole days can be "spent" from a (possibly fractional,
+            // carried-over) balance — any leftover fraction stays unused.
+            if ($leave->reason_id && $leave->leaveReason) {
+                if ($leave->leaveReason->deducts_leave_balance) {
+                    $remaining = (int) floor($this->balance($employee)['remaining']);
+                    $paid   = min($leave->days, $remaining);
+                    $unpaid = $leave->days - $paid;
+                } else {
+                    $paid   = 0;
+                    $unpaid = $leave->days;
+                }
+            } else {
+                // Legacy/free-type leave — same cumulative (carry-over) balance,
+                // no longer a monthly reset (section 10).
+                $remaining = (int) floor($this->balance($employee)['remaining']);
+                $paid   = min($leave->days, $remaining);
+                $unpaid = $leave->days - $paid;
+            }
 
             $leave->update([
                 'status'      => LeaveRequest::APPROVED,
@@ -122,16 +172,16 @@ class LeaveService
             $this->notifications->notify([$employee->id], 'leave', 'الموافقة على الإجازة', $msg,
                 ['type' => 'leave', 'leave_id' => $leave->id, 'route' => '/dashboard/my-leave']);
 
-            // Low-balance / exceeded warnings (monthly).
-            $after = $this->balance($employee, $year, $month);
+            // Low-balance / exceeded warnings — cumulative (carry-over) balance.
+            $after = $this->balance($employee);
             if ($unpaid > 0) {
                 $this->notifications->notify([$employee->id], 'leave', 'تجاوز رصيد الإجازات',
-                    "لقد تجاوزت رصيد إجازاتك الشهري؛ الأيام الزائدة ستُخصم كإجازة بدون أجر.",
+                    "لقد تجاوزت رصيد إجازاتك المتاح؛ الأيام الزائدة ستُخصم كإجازة بدون أجر.",
                     ['type' => 'leave', 'route' => '/dashboard/my-leave']);
-                $this->notifyReviewers($employee, 'موظف تجاوز رصيد الإجازات', "{$employee->name} تجاوز رصيد الإجازات الشهري.", '/dashboard/hr/leaves');
+                $this->notifyReviewers($employee, 'موظف تجاوز رصيد الإجازات', "{$employee->name} تجاوز رصيد الإجازات المتاح.", '/dashboard/hr/leaves');
             } elseif ($after['remaining'] <= self::LOW_BALANCE_THRESHOLD) {
                 $this->notifications->notify([$employee->id], 'leave', 'رصيد الإجازات منخفض',
-                    "تبقّى لديك {$after['remaining']} يوم إجازة فقط لهذا الشهر.",
+                    "تبقّى لديك {$after['remaining']} يوم إجازة فقط.",
                     ['type' => 'leave', 'route' => '/dashboard/my-leave']);
             }
 

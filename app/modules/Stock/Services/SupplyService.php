@@ -9,6 +9,7 @@ use App\Models\Supply;
 use App\Models\SupplyItem;
 use App\Models\User;
 use App\Modules\Safe\Services\SafeService;
+use App\Modules\Convention\Services\NotificationService;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\DB;
 
@@ -18,6 +19,7 @@ class SupplyService
         private InventoryAlertService $alerts,
         private SupplierPaymentService $payments,
         private SafeService $safeService,
+        private NotificationService $notifications,
     ) {}
 
     public function getAll(array $filters = [], int $perPage = 15): LengthAwarePaginator
@@ -145,6 +147,16 @@ class SupplyService
      */
     public function create(array $data, \App\Models\User $user): Supply
     {
+        // Snapshot taken BEFORE any new SupplyItem in this request is created —
+        // a product already in this set received supply at some point before
+        // now, so this new batch is an "existing product, new supply" case;
+        // a product NOT in this set is receiving its first-ever supply. Used
+        // only for the notification lifecycle distinction below — never for
+        // FIFO/pricing/inventory, which are all untouched.
+        $requestedProductIds = array_values(array_unique(array_column($data['items'], 'product_id')));
+        $productsWithPriorSupply = SupplyItem::whereIn('product_id', $requestedProductIds)
+            ->distinct()->pluck('product_id')->flip();
+
         $supply = DB::transaction(function () use ($data, $user) {
             // 1. إنشاء سجل التوريد — التاريخ يُولَّد دائماً من الخادم (لا يُدخله المستخدم)
             $today = now()->toDateString();
@@ -222,6 +234,64 @@ class SupplyService
             $this->alerts->evaluate((int) $pid, null);
             if ($product = Product::find($pid)) {
                 $pricingService->syncDisplayPrice($product);
+            }
+        }
+
+        // Every batch created above is unpriced by default (SupplyItem.selling_price
+        // starts null) — Pricing Management needs an explicit selling price before
+        // it can ever be sold. This does not block sales of any older, already-
+        // priced batch still in stock (see fifoBatchesQuery/searchCatalogProducts —
+        // they simply skip unpriced batches), it's purely an admin heads-up.
+        //
+        // Split by lifecycle (see PricingService::pendingPricingSummary()): a
+        // product with no prior supply is a first-ever-price case; a product
+        // that already had supply before this request is an existing product
+        // just getting a new batch. Only the bucket(s) this event actually
+        // touched get notified, but the count shown is the CURRENT system-wide
+        // total for that bucket (via notifyAdminsAggregated's dedup — refreshes
+        // the admin's existing unread notification instead of stacking a new
+        // one), never just this event's own count.
+        if ($supply->items->isNotEmpty()) {
+            $touchedFirstTime = false;
+            $touchedExisting = false;
+            foreach ($supply->items as $item) {
+                if ($productsWithPriorSupply->has($item->product_id)) {
+                    $touchedExisting = true;
+                } else {
+                    $touchedFirstTime = true;
+                }
+            }
+
+            $summary = $pricingService->pendingPricingSummary();
+
+            if ($touchedFirstTime && $summary['first_pricing']['count'] > 0) {
+                $s = $summary['first_pricing'];
+                $this->notifications->notifyAdminsAggregated(
+                    'new_product_needs_pricing',
+                    'منتجات جديدة تحتاج تحديد سعر البيع',
+                    $s['count'] . ' منتج جديد وصل لأول مرة ويحتاج تحديد سعر البيع — ' . implode('، ', array_slice($s['product_names'], 0, 5)),
+                    [
+                        'route' => '/dashboard/pricing?filter=first_pricing',
+                        'batch_count' => $s['count'],
+                        'product_ids' => $s['product_ids'],
+                        'product_names' => $s['product_names'],
+                    ]
+                );
+            }
+
+            if ($touchedExisting && $summary['pricing_required']['count'] > 0) {
+                $s = $summary['pricing_required'];
+                $this->notifications->notifyAdminsAggregated(
+                    'batches_need_pricing',
+                    'توريدات جديدة تحتاج تحديث سعر البيع',
+                    $s['count'] . ' دفعة جديدة لمنتجات موجودة تحتاج تحديث سعر البيع — ' . implode('، ', array_slice($s['product_names'], 0, 5)),
+                    [
+                        'route' => '/dashboard/pricing?filter=pricing_required',
+                        'batch_count' => $s['count'],
+                        'product_ids' => $s['product_ids'],
+                        'product_names' => $s['product_names'],
+                    ]
+                );
             }
         }
 

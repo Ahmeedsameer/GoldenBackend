@@ -221,6 +221,52 @@ class PricingService
     }
 
     /**
+     * System-wide snapshot of pending pricing work, split by the same
+     * lifecycle distinction as pricing_queue (batchRowFor()): batches whose
+     * product has never had ANY priced batch ('first_pricing') vs batches
+     * whose product already has at least one priced batch elsewhere
+     * ('pricing_required'). Recomputed fresh on every call — never cached —
+     * so it always reflects the real current backend state; used to keep
+     * the "batches need pricing" Admin notification's count accurate
+     * (e.g. refreshing 3 → 8) instead of just describing one event.
+     */
+    public function pendingPricingSummary(): array
+    {
+        $unpriced = SupplyItem::query()
+            ->whereNull('selling_price')
+            ->whereNull('archived_at')
+            ->with('product:id,name')
+            ->get(['id', 'product_id']);
+
+        $empty = ['count' => 0, 'product_ids' => [], 'product_names' => []];
+        if ($unpriced->isEmpty()) {
+            return ['first_pricing' => $empty, 'pricing_required' => $empty];
+        }
+
+        $productIds = $unpriced->pluck('product_id')->unique()->values();
+        $pricedProductIds = SupplyItem::whereIn('product_id', $productIds)
+            ->whereNotNull('selling_price')
+            ->whereNull('archived_at')
+            ->distinct()
+            ->pluck('product_id')
+            ->flip();
+
+        $firstPricing = $unpriced->filter(fn ($item) => ! $pricedProductIds->has($item->product_id));
+        $pricingRequired = $unpriced->filter(fn ($item) => $pricedProductIds->has($item->product_id));
+
+        $summarize = fn ($items) => [
+            'count' => $items->count(),
+            'product_ids' => $items->pluck('product_id')->unique()->values()->all(),
+            'product_names' => $items->pluck('product.name')->filter()->unique()->values()->all(),
+        ];
+
+        return [
+            'first_pricing' => $summarize($firstPricing),
+            'pricing_required' => $summarize($pricingRequired),
+        ];
+    }
+
+    /**
      * Every batch for this product, oldest-first, with its own remaining
      * quantity (summed across every shop's Goods rows) plus the three figures
      * a manager needs to know what customers pay today vs. what kicks in
@@ -324,6 +370,14 @@ class PricingService
             'batches_priced' => $status['batches_priced'],
             'batches_unpriced' => $status['batches_unpriced'],
             'needs_pricing' => $status['needs_pricing'],
+            // Lifecycle distinction the Admin's two Pricing Management queues
+            // are built on: a product with ZERO batches ever priced is
+            // receiving its very FIRST selling price ('first_pricing'); a
+            // product that already has at least one priced batch but also
+            // has a newer unpriced one is an existing, already-sellable
+            // product just getting a price update on its new stock
+            // ('pricing_required'). Null when there's nothing to price.
+            'pricing_queue' => ! $status['needs_pricing'] ? null : ($status['batches_priced'] === 0 ? 'first_pricing' : 'pricing_required'),
             'latest_supply_date' => $status['latest_supply_date'],
             'latest_pricing_date' => $status['latest_pricing_date'],
             'status' => $status['status'],
@@ -412,6 +466,46 @@ class PricingService
         });
 
         $this->syncDisplayPrice($product);
+    }
+
+    /**
+     * Bulk pricing — lets the Admin select several batches (across one or many
+     * products) that need pricing and submit them together, but each batch
+     * keeps its OWN price; this is a convenience wrapper around priceBatch()
+     * called once per item, never a single shared price applied to everything.
+     * Each item is independent: one invalid/already-priced/below-minimum item
+     * does not abort the others — every result (success or the specific
+     * failure reason) is reported back so the admin can see exactly what
+     * happened per batch. Reuses priceBatch() verbatim, so every existing
+     * guard (immutable-once-priced, category minimum, batch-priced-only)
+     * still applies identically to each item.
+     *
+     * @param  array<int, array{supply_item_id:int, selling_price:float, reason?:?string}>  $items
+     * @return array<int, array{supply_item_id:int, success:bool, message:string}>
+     */
+    public function bulkPriceBatches(array $items, User $admin): array
+    {
+        $results = [];
+
+        foreach ($items as $item) {
+            $supplyItemId = (int) $item['supply_item_id'];
+
+            try {
+                $batch = SupplyItem::findOrFail($supplyItemId);
+                $product = Product::findOrFail($batch->product_id);
+
+                $this->priceBatch($product, $batch, (float) $item['selling_price'], $item['reason'] ?? null, $admin);
+
+                $results[] = ['supply_item_id' => $supplyItemId, 'success' => true, 'message' => 'تم تسعير الدفعة بنجاح'];
+            } catch (\Throwable $e) {
+                $message = $e instanceof \Symfony\Component\HttpKernel\Exception\HttpExceptionInterface
+                    ? $e->getMessage()
+                    : 'تعذر تسعير هذه الدفعة.';
+                $results[] = ['supply_item_id' => $supplyItemId, 'success' => false, 'message' => $message];
+            }
+        }
+
+        return $results;
     }
 
     /** Shared by priceBatch()/updateBatchPrice() — the category minimum is the

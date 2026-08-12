@@ -3,6 +3,7 @@
 namespace App\Modules\Hr\Services;
 
 use App\Models\HrDeductionSetting;
+use App\Models\LeaveReason;
 use App\Models\LeaveRequest;
 use App\Models\Payroll;
 use App\Models\PayrollLine;
@@ -23,6 +24,8 @@ use Illuminate\Validation\ValidationException;
  *                + Personal Sales Commission
  *                + Branch Bonus (equal share of branch pools)
  *                + Manual Bonuses
+ *                + Overtime Pay (Admin-granted hours × hourly rate)
+ *                + Leave Encashment (Admin-approved cash-out of carry-over leave balance)
  *                − Manual Penalties
  *                − Automatic Attendance Deductions (absence / late / half-day)
  *                − Unpaid Leave Deductions
@@ -46,6 +49,8 @@ class PayrollService
         private BonusPenaltyService $bonusPenalty,
         private SalaryAdvanceService $salaryAdvance,
         private SafeService $safes,
+        private OvertimeService $overtime,
+        private LeaveCashOutService $leaveCashOut,
     ) {}
 
     /** Company-wide default currency for salary payments — same fallback SalaryAdvanceService/SalesService already use. */
@@ -93,6 +98,10 @@ class PayrollService
             $penalties    = $c['penalties'];
             $bonusTotal   = $c['bonusTotal'];
             $penaltyTotal = $c['penaltyTotal'];
+            $overtimeRecords = $c['overtimeRecords'];
+            $overtimeTotal   = $c['overtimeTotal'];
+            $cashOutRecords  = $c['cashOutRecords'];
+            $cashOutTotal    = $c['cashOutTotal'];
 
             // ── Salary Advance installment (this month, if any is due) ────────
             $advanceHit = $this->salaryAdvance->deductForPayroll($employee, $year, $month);
@@ -113,6 +122,8 @@ class PayrollService
                 'personal_commission_amount'  => $personal['amount'],
                 'branch_commission_amount'    => $branch['total'],
                 'bonus_total'                 => $bonusTotal,
+                'overtime_total'              => $overtimeTotal,
+                'leave_encashment_total'      => $cashOutTotal,
                 'penalty_total'               => $penaltyTotal,
                 'advance_deduction'           => $advanceDeduction,
                 'gross'                       => $gross,
@@ -144,6 +155,17 @@ class PayrollService
             foreach ($bonuses as $b) {
                 $lines[] = ['type' => PayrollLine::BONUS, 'label' => $b->reason, 'amount' => (float) $b->amount,
                     'meta' => ['bonus_id' => $b->id, 'date' => $b->date->toDateString(), 'notes' => $b->notes]];
+            }
+            foreach ($overtimeRecords as $o) {
+                $lines[] = ['type' => PayrollLine::OVERTIME, 'label' => 'عمل إضافي بتاريخ ' . $o->date->toDateString(),
+                    'amount' => (float) $o->pay,
+                    'meta' => ['overtime_id' => $o->id, 'date' => $o->date->toDateString(), 'start_time' => $o->start_time,
+                        'end_time' => $o->end_time, 'hours' => (float) $o->hours, 'hourly_rate' => (float) $o->hourly_rate]];
+            }
+            foreach ($cashOutRecords as $co) {
+                $lines[] = ['type' => PayrollLine::LEAVE_ENCASHMENT, 'label' => 'تحويل رصيد إجازة إلى نقد',
+                    'amount' => (float) $co->amount,
+                    'meta' => ['cash_out_id' => $co->id, 'date' => $co->date->toDateString(), 'days' => (float) $co->days, 'daily_rate' => (float) $co->daily_rate]];
             }
             foreach ($penalties as $p) {
                 $lines[] = ['type' => PayrollLine::PENALTY, 'label' => $p->reason, 'amount' => -(float) $p->amount,
@@ -332,8 +354,14 @@ class PayrollService
         $branch   = $this->commissions->branchCommission($employee, $from, $to);
 
         $att        = $this->attendance->summary($employee->id, $from, $to);
+        // Legacy (reason_id=NULL) leaves only — reason-based leaves' excess
+        // days are handled entirely by the per-reason loop below, using each
+        // reason's OWN rate; mixing them into this generic 'unpaid_leave'
+        // code would apply the wrong rate (or deduct even when the reason's
+        // deducts_salary is off).
         $unpaidDays = (int) LeaveRequest::where('user_id', $employee->id)
             ->where('status', LeaveRequest::APPROVED)
+            ->whereNull('reason_id')
             ->whereYear('start_date', $from->year)->whereMonth('start_date', $from->month)
             ->sum('unpaid_days');
 
@@ -371,13 +399,60 @@ class PayrollService
             ];
         }
 
+        // Admin-configured LeaveReason deductions — fully additive, next to
+        // (never replacing) the fixed 4-code loop above. Only approved leave
+        // requests that explicitly reference a reason with deducts_salary=true
+        // contribute here. The two flags are independent and applied
+        // SEQUENTIALLY when both are on: `unpaid_days` (set by
+        // LeaveService::approve()) already holds only the days NOT covered
+        // by the balance — the excess — so summing it here, never the raw
+        // `days`, guarantees a balance-covered day is never ALSO
+        // salary-deducted. Each reason uses its OWN mode/value — never the
+        // shared hr_deduction_settings rate — and no reason name is ever
+        // special-cased here; only these configured columns are read.
+        $reasonLeaves = LeaveRequest::where('user_id', $employee->id)
+            ->where('status', LeaveRequest::APPROVED)
+            ->whereNotNull('reason_id')
+            ->whereYear('start_date', $from->year)->whereMonth('start_date', $from->month)
+            ->with('leaveReason')
+            ->get()
+            ->filter(fn (LeaveRequest $lr) => $lr->leaveReason && $lr->leaveReason->deducts_salary && $lr->leaveReason->is_active !== false);
+
+        foreach ($reasonLeaves->groupBy('reason_id') as $leavesForReason) {
+            $reason = $leavesForReason->first()->leaveReason;
+            $qty    = (int) $leavesForReason->sum('unpaid_days');
+            if ($qty <= 0) {
+                continue;
+            }
+            $per    = $reason->deduction_mode === LeaveReason::MODE_DAILY_FRACTION
+                ? (float) $reason->deduction_value * $dailyRate
+                : (float) $reason->deduction_value;
+            $amount = round($per * $qty, 2);
+            if ($amount <= 0) {
+                continue;
+            }
+            $totalDeductions += $amount;
+            $deductionLines[] = [
+                'type'   => PayrollLine::DEDUCTION,
+                'label'  => $reason->name,
+                'amount' => -$amount,
+                'meta'   => ['reason_id' => $reason->id, 'qty' => $qty, 'per_unit' => round($per, 2), 'mode' => $reason->deduction_mode, 'value' => (float) $reason->deduction_value],
+            ];
+        }
+
         $bonuses      = $this->bonusPenalty->bonusesFor($employee->id, $from, $to);
         $penalties    = $this->bonusPenalty->penaltiesFor($employee->id, $from, $to);
         $bonusTotal   = round((float) $bonuses->sum('amount'), 2);
         $penaltyTotal = round((float) $penalties->sum('amount'), 2);
         $totalDeductions += $penaltyTotal;
 
-        $gross = round($base + $personal['amount'] + $branch['total'] + $bonusTotal, 2);
+        $overtimeRecords = $this->overtime->forPeriod($employee->id, $from, $to);
+        $overtimeTotal   = round((float) $overtimeRecords->sum('pay'), 2);
+
+        $cashOutRecords = $this->leaveCashOut->forPeriod($employee->id, $from, $to);
+        $cashOutTotal   = round((float) $cashOutRecords->sum('amount'), 2);
+
+        $gross = round($base + $personal['amount'] + $branch['total'] + $bonusTotal + $overtimeTotal + $cashOutTotal, 2);
 
         return [
             'base'            => $base,
@@ -393,6 +468,10 @@ class PayrollService
             'penalties'       => $penalties,
             'bonusTotal'      => $bonusTotal,
             'penaltyTotal'    => $penaltyTotal,
+            'overtimeRecords' => $overtimeRecords,
+            'overtimeTotal'   => $overtimeTotal,
+            'cashOutRecords'  => $cashOutRecords,
+            'cashOutTotal'    => $cashOutTotal,
             'gross'           => $gross,
         ];
     }
@@ -441,6 +520,8 @@ class PayrollService
             'personal_commission' => $c['personal']['amount'],
             'branch_bonus'        => $c['branch']['total'],
             'bonus_total'         => $c['bonusTotal'],
+            'overtime_total'      => $c['overtimeTotal'],
+            'leave_encashment_total' => $c['cashOutTotal'],
             'penalty_total'       => $c['penaltyTotal'],
             'deduction_lines'     => $c['deductionLines'],
             'attendance_deductions' => round($c['totalDeductions'] - $c['penaltyTotal'], 2),

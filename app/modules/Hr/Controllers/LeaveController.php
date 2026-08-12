@@ -5,8 +5,10 @@ namespace App\Modules\Hr\Controllers;
 use App\Http\Controllers\Controller;
 use App\Models\LeaveRequest;
 use App\Models\Shop;
+use App\Models\User;
 use App\Modules\Hr\Services\LeaveService;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
 class LeaveController extends Controller
@@ -22,6 +24,10 @@ class LeaveController extends Controller
             'start_date' => ['required', 'date'],
             'end_date'   => ['required', 'date', 'after_or_equal:start_date'],
             'type'       => ['nullable', 'in:annual,unpaid,sick'],
+            // Only an ACTIVE reason is selectable for a new request — a
+            // disabled reason still stays attached to any past requests that
+            // already reference it, but can never be chosen again.
+            'reason_id'  => ['nullable', 'integer', Rule::exists('leave_reasons', 'id')->where('is_active', true)],
             'reason'     => ['nullable', 'string'],
         ]);
 
@@ -34,7 +40,7 @@ class LeaveController extends Controller
     public function mine(Request $request)
     {
         $user = $request->user();
-        $rows = LeaveRequest::where('user_id', $user->id)->latest()->paginate(20);
+        $rows = LeaveRequest::where('user_id', $user->id)->with('leaveReason:id,name')->latest()->paginate(20);
 
         return response()->json([
             'message' => 'ok',
@@ -53,10 +59,18 @@ class LeaveController extends Controller
 
     // ── Admin / Manager review ────────────────────────────────
 
+    /** GET /api/hr/employees/{id}/leave-balance — admin viewing any employee's cumulative leave balance. */
+    public function balanceFor(string $id)
+    {
+        $employee = User::findOrFail($id);
+
+        return response()->json(['message' => 'ok', 'data' => $this->leaves->balance($employee)]);
+    }
+
     /** GET /api/hr/leaves — all requests (admin) or branch requests (manager). */
     public function index(Request $request)
     {
-        $query = LeaveRequest::with('user:id,name,email,shop_id');
+        $query = LeaveRequest::with(['user:id,name,email,shop_id', 'leaveReason:id,name']);
 
         if ($request->user()->role === 'manager') {
             $branchId = Shop::where('manager_id', $request->user()->id)->value('id') ?? $request->user()->shop_id;

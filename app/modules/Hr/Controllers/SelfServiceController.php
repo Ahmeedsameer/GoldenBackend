@@ -68,7 +68,9 @@ class SelfServiceController extends Controller
                 'attendance'     => $this->attendance->summary($me->id, $from, $to),
                 'leave_balance'  => $this->leaves->balance($me),
                 'recent_payrolls'=> Payroll::where('user_id', $me->id)->latest()->take(6)
-                    ->get(['id', 'period_year', 'period_month', 'net_salary', 'status', 'is_locked']),
+                    ->get(['id', 'period_year', 'period_month', 'base_salary', 'personal_commission_amount',
+                        'branch_commission_amount', 'bonus_total', 'overtime_total', 'leave_encashment_total',
+                        'total_deductions', 'net_salary', 'status', 'is_locked']),
                 'transfers'      => EmployeeTransfer::where('user_id', $me->id)
                     ->whereIn('status', ['scheduled', 'active'])
                     ->with('temporaryBranch:id,name')
@@ -127,9 +129,25 @@ class SelfServiceController extends Controller
     /** GET /api/hr/me/sales?year=&month= — personal sales/commission page. */
     public function sales(Request $request)
     {
-        $me    = $request->user();
         $year  = $request->integer('year', now()->year);
         $month = $request->integer('month', now()->month);
+
+        return response()->json(['message' => 'ok', 'data' => $this->buildSales($request->user(), $year, $month)]);
+    }
+
+    /** GET /api/hr/employees/{id}/sales?year=&month= — admin viewing any employee's monthly sales/commission. */
+    public function salesFor(string $id, Request $request)
+    {
+        $employee = User::findOrFail($id);
+        $year     = $request->integer('year', now()->year);
+        $month    = $request->integer('month', now()->month);
+
+        return response()->json(['message' => 'ok', 'data' => $this->buildSales($employee, $year, $month)]);
+    }
+
+    /** Shared by sales() (self) and salesFor() (admin) — identical calculation, only the target employee differs. */
+    private function buildSales(User $me, int $year, int $month): array
+    {
         $from  = Carbon::create($year, $month, 1)->startOfMonth();
         $to    = $from->copy()->endOfMonth();
 
@@ -150,28 +168,25 @@ class SelfServiceController extends Controller
         $penaltyTotal = round((float) Penalty::where('user_id', $me->id)->where('status', Penalty::ACTIVE)
             ->whereBetween('date', [$from->toDateString(), $to->toDateString()])->sum('amount'), 2);
 
-        return response()->json([
-            'message' => 'ok',
-            'data' => [
-                'period' => ['year' => $year, 'month' => $month, 'from' => $from->toDateString(), 'to' => $to->toDateString()],
-                'invoices' => [
-                    'approved' => ['count' => $approvedCount, 'total' => round($approvedTotal, 2)],
-                    'pending'  => ['count' => (int) ($byStatus['pending']->c ?? 0),   'total' => round((float) ($byStatus['pending']->total ?? 0), 2)],
-                    // "Rejected" in the UI maps to the invoice's actual 'cancelled' status.
-                    'rejected' => ['count' => (int) ($byStatus['cancelled']->c ?? 0), 'total' => round((float) ($byStatus['cancelled']->total ?? 0), 2)],
-                ],
-                'personal_commission' => $personal,
-                'branch_bonus'        => $branch,
-                'bonus_total'         => $bonusTotal,
-                'penalty_total'       => $penaltyTotal,
-                'estimated_salary'    => round($estimated + $bonusTotal - $penaltyTotal, 2),
-                'monthly_performance' => [
-                    'invoices_count'      => $approvedCount,
-                    'total_sales'         => round($approvedTotal, 2),
-                    'average_invoice'     => $approvedCount > 0 ? round($approvedTotal / $approvedCount, 2) : 0,
-                ],
+        return [
+            'period' => ['year' => $year, 'month' => $month, 'from' => $from->toDateString(), 'to' => $to->toDateString()],
+            'invoices' => [
+                'approved' => ['count' => $approvedCount, 'total' => round($approvedTotal, 2)],
+                'pending'  => ['count' => (int) ($byStatus['pending']->c ?? 0),   'total' => round((float) ($byStatus['pending']->total ?? 0), 2)],
+                // "Rejected" in the UI maps to the invoice's actual 'cancelled' status.
+                'rejected' => ['count' => (int) ($byStatus['cancelled']->c ?? 0), 'total' => round((float) ($byStatus['cancelled']->total ?? 0), 2)],
             ],
-        ]);
+            'personal_commission' => $personal,
+            'branch_bonus'        => $branch,
+            'bonus_total'         => $bonusTotal,
+            'penalty_total'       => $penaltyTotal,
+            'estimated_salary'    => round($estimated + $bonusTotal - $penaltyTotal, 2),
+            'monthly_performance' => [
+                'invoices_count'      => $approvedCount,
+                'total_sales'         => round($approvedTotal, 2),
+                'average_invoice'     => $approvedCount > 0 ? round($approvedTotal / $approvedCount, 2) : 0,
+            ],
+        ];
     }
 
     /** GET /api/hr/me/timeline — own chronological employment history. */

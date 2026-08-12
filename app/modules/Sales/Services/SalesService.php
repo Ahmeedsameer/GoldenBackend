@@ -17,6 +17,7 @@ use App\Models\Shop;
 use App\Models\User;
 use App\Modules\Safe\Services\SafeService;
 use App\Modules\Hr\Services\ActiveBranchService;
+use App\Modules\Hr\Services\ShiftAccessService;
 use App\Modules\Sales\Services\SalesAuditLogger;
 use App\Modules\Stock\Services\InventoryAlertService;
 use Illuminate\Support\Facades\Cache;
@@ -28,6 +29,7 @@ class SalesService
         private SafeService $safeService,
         private InventoryAlertService $inventoryAlerts,
         private SalesAuditLogger $salesAuditLogger,
+        private ShiftAccessService $shiftAccess,
     ) {}
     // ── Frontend utility: search available goods in seller's shop ─────────────
 
@@ -324,6 +326,16 @@ class SalesService
         // ops, reports, HR) — only the act of selling is blocked for them.
         if ($leaveMessage = LeaveRequest::leaveMessageFor($seller->id)) {
             abort(403, $leaveMessage);
+        }
+
+        // Shift Lock — mirrors the Leave Lock immediately above, same
+        // "checked before any read/write" placement. Admin is exempt (they
+        // are not subject to employee shift rules); sales/manager may only
+        // sell inside their published WORK shift or an approved Overtime
+        // window for today, enforced here at the service layer so it can
+        // never be bypassed by a stale/active frontend session.
+        if ($seller->role !== 'admin' && ($shiftMessage = $this->shiftAccess->blockMessageFor($seller->id))) {
+            abort(403, $shiftMessage);
         }
 
         if (! $seller->shop_id) {
@@ -1313,18 +1325,28 @@ class SalesService
             ? $this->compoundComposability($shopId)
             : null;
 
-        return $products->map(fn ($p) => [
-            'id' => $p->id, 'name' => $p->name, 'sku' => $p->sku, 'barcode' => $p->barcode,
-            'image' => $p->image ? asset('storage/' . $p->image) : null, 'product_type' => $p->product_type,
-            'configured_unit_price' => $p->product_type === Product::TYPE_READY_PRODUCT ? $this->resolveConfiguredUnitPrice($p, $shopId) : null,
-            'shop_stock' => $p->product_type === Product::TYPE_READY_PRODUCT ? (float) ($stocks[$p->id] ?? 0) : null,
-            'unit' => $p->scalar,
-            // Phase 7 — Composite Products only: a preferred oil to pre-select (never
-            // lock) in the Assemble-on-Sale dialog. Null for every other product type.
-            'default_oil_id' => $p->product_type === Product::TYPE_COMPOUND ? $p->default_oil_id : null,
-            'compound_available' => $p->product_type === Product::TYPE_COMPOUND ? $compoundAvailability['available'] : null,
-            'compound_unavailable_reason' => $p->product_type === Product::TYPE_COMPOUND ? $compoundAvailability['reason'] : null,
-        ])->values()->all();
+        return $products
+            ->map(fn ($p) => [
+                'id' => $p->id, 'name' => $p->name, 'sku' => $p->sku, 'barcode' => $p->barcode,
+                'image' => $p->image ? asset('storage/' . $p->image) : null, 'product_type' => $p->product_type,
+                'configured_unit_price' => $p->product_type === Product::TYPE_READY_PRODUCT ? $this->resolveConfiguredUnitPrice($p, $shopId) : null,
+                'shop_stock' => $p->product_type === Product::TYPE_READY_PRODUCT ? (float) ($stocks[$p->id] ?? 0) : null,
+                'unit' => $p->scalar,
+                // Phase 7 — Composite Products only: a preferred oil to pre-select (never
+                // lock) in the Assemble-on-Sale dialog. Null for every other product type.
+                'default_oil_id' => $p->product_type === Product::TYPE_COMPOUND ? $p->default_oil_id : null,
+                'compound_available' => $p->product_type === Product::TYPE_COMPOUND ? $compoundAvailability['available'] : null,
+                'compound_unavailable_reason' => $p->product_type === Product::TYPE_COMPOUND ? $compoundAvailability['reason'] : null,
+            ])
+            // A READY_PRODUCT with no resolvable price has never been supplied,
+            // or every batch it ever received is either unpriced or exhausted —
+            // there is no sellable stock to add to an invoice, so it must not
+            // appear in the catalog at all (business rule: a product with zero
+            // priced/in-stock batches is not sellable). COMPOUND/other types are
+            // untouched — their own availability gates (compound_available) already
+            // handle this without a resolvable "configured_unit_price".
+            ->reject(fn ($row) => $row['product_type'] === Product::TYPE_READY_PRODUCT && $row['configured_unit_price'] === null)
+            ->values()->all();
     }
 
     /** Whether this shop currently has at least one priced, in-stock oil AND

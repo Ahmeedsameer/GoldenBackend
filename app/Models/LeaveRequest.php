@@ -19,6 +19,7 @@ class LeaveRequest extends Model
         'original_end_date',
         'days',
         'type',
+        'reason_id',
         'status',
         'reason',
         'paid_days',
@@ -46,6 +47,17 @@ class LeaveRequest extends Model
     public function reviewer(): BelongsTo
     {
         return $this->belongsTo(User::class, 'reviewed_by');
+    }
+
+    /**
+     * Named leaveReason() (not reason()) — the `reason` COLUMN is a free-text
+     * note field on this model already, and Eloquent's attribute accessor
+     * would silently win over a same-named relation method, returning the
+     * string instead of the related LeaveReason model.
+     */
+    public function leaveReason(): BelongsTo
+    {
+        return $this->belongsTo(LeaveReason::class, 'reason_id');
     }
 
     public function endedBy(): BelongsTo

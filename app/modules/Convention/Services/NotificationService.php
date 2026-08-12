@@ -87,6 +87,60 @@ class NotificationService
         return $notification;
     }
 
+    /**
+     * Send an admin notification that represents an ongoing UNRESOLVED queue
+     * of work (e.g. "N batches need pricing") rather than a one-off event —
+     * refreshes the existing unread notification of the same type instead of
+     * stacking a new row every time the queue changes size, so an admin who
+     * hasn't acted yet sees "8 batches" (the current total), never a pile of
+     * stale "3 batches" / "5 batches" duplicates for the same unresolved
+     * state. Once the admin reads it (existing markAsRead/markAllAsRead —
+     * e.g. by clicking it), the next call for that type starts a fresh row,
+     * which is the correct signal that new work arrived after they last
+     * looked. Reuses the exact same Notification table/broadcast/Web Push
+     * plumbing as notifyAdmins() — no second notification store.
+     *
+     * @return int number of admins notified (created or refreshed)
+     */
+    public function notifyAdminsAggregated(string $type, string $title, string $message, array $data = []): int
+    {
+        $adminIds = User::where('role', 'admin')->pluck('id');
+
+        foreach ($adminIds as $adminId) {
+            $this->upsertUnreadAndBroadcast((int) $adminId, $type, $title, $message, $data);
+        }
+
+        $this->webPush->sendToUsers($adminIds->all(), $title, $message, array_merge($data, ['type' => $type]));
+
+        return $adminIds->count();
+    }
+
+    private function upsertUnreadAndBroadcast(int $userId, string $type, string $title, string $message, array $data): Notification
+    {
+        $existing = Notification::where('user_id', $userId)
+            ->where('type', $type)
+            ->whereNull('read_at')
+            ->latest('id')
+            ->first();
+
+        if ($existing) {
+            $existing->update(['title' => $title, 'message' => $message, 'data' => $data ?: null]);
+            $notification = $existing;
+        } else {
+            $notification = Notification::create([
+                'user_id' => $userId, 'type' => $type, 'title' => $title, 'message' => $message, 'data' => $data ?: null,
+            ]);
+        }
+
+        try {
+            broadcast(new NotificationCreated($notification, $this->unreadCount($userId)));
+        } catch (\Throwable $e) {
+            Log::warning('[broadcast] ' . $e->getMessage());
+        }
+
+        return $notification;
+    }
+
     public function webPush(): WebPushService
     {
         return $this->webPush;

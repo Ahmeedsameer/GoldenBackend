@@ -245,17 +245,20 @@ class ScheduleService
      * "N موظفين لديهم شيفت مسجل بالفعل" BEFORE the admin/manager chooses
      * skip-vs-replace, so nothing is ever silently overwritten.
      *
-     * @return array<int, array{user_id:int, name:string, type:string, shift_name:?string}>
+     * @return array<int, array{user_id:int, name:string, date:string, type:string, shift_name:?string}>
      */
-    public function findExistingEntriesForDate(array $userIds, string $date): array
+    public function findExistingEntriesForDate(array $userIds, string $from, ?string $to = null): array
     {
+        $to ??= $from;
+
         return ScheduleEntry::whereIn('user_id', $userIds)
-            ->where('date', $date)
+            ->whereBetween('date', [$from, $to])
             ->with(['user:id,name', 'shiftTemplate:id,name'])
             ->get()
             ->map(fn (ScheduleEntry $e) => [
                 'user_id'    => $e->user_id,
                 'name'       => $e->user?->name,
+                'date'       => $e->date->toDateString(),
                 'type'       => $e->type,
                 'shift_name' => $e->shiftTemplate?->name,
             ])
@@ -265,62 +268,77 @@ class ScheduleService
 
     /**
      * Bulk Shift Assignment — assign ONE shift template (type=work, times taken
-     * from the template) to MANY employees on ONE date, in a single atomic
-     * transaction. This is deliberately a SEPARATE method from bulkUpsert():
-     * bulkUpsert() always overwrites (it's "save my staged per-cell edits",
-     * where the admin already saw and chose every value) and has no
-     * skip-vs-replace concept, which this feature explicitly requires
-     * (existing entries are never silently overwritten — see
-     * findExistingEntriesForDate() above). Internally reuses the exact same
-     * transfer-conflict guard (isTransferred) and updateOrCreate pattern as
-     * every other write path in this service, so a bulk-assigned entry is
-     * indistinguishable from one saved through the normal grid editor.
+     * from the template) to MANY employees across EVERY day in an inclusive
+     * [from, to] date range (a single date is simply from === to), in one
+     * atomic transaction. This is deliberately a SEPARATE method from
+     * bulkUpsert(): bulkUpsert() always overwrites (it's "save my staged
+     * per-cell edits", where the admin already saw and chose every value)
+     * and has no skip-vs-replace concept, which this feature explicitly
+     * requires (existing entries — including approved leave, holidays,
+     * weekly-off, sick leave, or any other special status — are never
+     * silently overwritten; see findExistingEntriesForDate() above).
+     * Internally reuses the exact same transfer-conflict guard
+     * (isTransferred) and updateOrCreate pattern as every other write path
+     * in this service, so a bulk-assigned entry is indistinguishable from
+     * one saved through the normal grid editor.
      *
      * @return array{assigned:int, skipped_existing:int[], skipped_transferred:int[]}
      */
-    public function bulkAssignShift(array $userIds, ShiftTemplate $template, string $date, bool $replaceExisting): array
+    public function bulkAssignShift(array $userIds, ShiftTemplate $template, string $from, bool $replaceExisting, ?string $to = null): array
     {
+        $to ??= $from;
+        $dates = [];
+        $cursor = Carbon::parse($from);
+        $end = Carbon::parse($to);
+        while ($cursor->lessThanOrEqualTo($end)) {
+            $dates[] = $cursor->toDateString();
+            $cursor->addDay();
+        }
+
         $assigned = 0;
         $skippedExisting = [];
         $skippedTransferred = [];
         $before = [];
         $after = [];
 
-        DB::transaction(function () use ($userIds, $template, $date, $replaceExisting, &$assigned, &$skippedExisting, &$skippedTransferred, &$before, &$after) {
+        DB::transaction(function () use ($userIds, $template, $dates, $replaceExisting, &$assigned, &$skippedExisting, &$skippedTransferred, &$before, &$after) {
             foreach ($userIds as $userId) {
-                if ($this->isTransferred($userId, $date)) {
-                    $skippedTransferred[] = $userId;
-                    continue;
-                }
+                foreach ($dates as $date) {
+                    if ($this->isTransferred($userId, $date)) {
+                        $skippedTransferred[] = ['user_id' => $userId, 'date' => $date];
+                        continue;
+                    }
 
-                $existing = ScheduleEntry::where('user_id', $userId)->where('date', $date)->first();
-                if ($existing && ! $replaceExisting) {
-                    $skippedExisting[] = $userId;
-                    continue;
-                }
-                if ($existing) {
-                    $before[] = ['user_id' => $userId, 'date' => $date, ...$existing->only(['type', 'shift_template_id', 'start_time', 'end_time'])];
-                }
+                    $existing = ScheduleEntry::where('user_id', $userId)->where('date', $date)->first();
+                    if ($existing && ! $replaceExisting) {
+                        $skippedExisting[] = ['user_id' => $userId, 'date' => $date];
+                        continue;
+                    }
+                    if ($existing) {
+                        $before[] = ['user_id' => $userId, 'date' => $date, ...$existing->only(['type', 'shift_template_id', 'start_time', 'end_time'])];
+                    }
 
-                ScheduleEntry::updateOrCreate(
-                    ['user_id' => $userId, 'date' => $date],
-                    [
-                        'type'              => ScheduleEntry::WORK,
-                        'shift_template_id' => $template->id,
-                        'start_time'        => $template->start_time,
-                        'end_time'          => $template->end_time,
-                        'created_by'        => auth()->id(),
-                    ],
-                );
-                $after[] = ['user_id' => $userId, 'date' => $date, 'shift_template_id' => $template->id];
-                $assigned++;
+                    ScheduleEntry::updateOrCreate(
+                        ['user_id' => $userId, 'date' => $date],
+                        [
+                            'type'              => ScheduleEntry::WORK,
+                            'shift_template_id' => $template->id,
+                            'start_time'        => $template->start_time,
+                            'end_time'          => $template->end_time,
+                            'created_by'        => auth()->id(),
+                        ],
+                    );
+                    $after[] = ['user_id' => $userId, 'date' => $date, 'shift_template_id' => $template->id];
+                    $assigned++;
+                }
             }
         });
 
         if ($assigned > 0) {
             $this->audit->log('schedule.bulk_assigned', null, ['entries' => $before], [
                 'entries' => $after, 'assigned' => $assigned, 'shift_template_id' => $template->id,
-                'date' => $date, 'skipped_existing' => count($skippedExisting), 'skipped_transferred' => count($skippedTransferred),
+                'date_from' => $dates[0] ?? null, 'date_to' => end($dates) ?: null,
+                'skipped_existing' => count($skippedExisting), 'skipped_transferred' => count($skippedTransferred),
             ]);
         }
 

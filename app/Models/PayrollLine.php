@@ -14,6 +14,8 @@ class PayrollLine extends Model
     public const BONUS               = 'bonus';
     public const PENALTY             = 'penalty';
     public const ADVANCE             = 'salary_advance';
+    public const OVERTIME            = 'overtime';
+    public const LEAVE_ENCASHMENT    = 'leave_encashment';
 
     protected $fillable = [
         'payroll_id',

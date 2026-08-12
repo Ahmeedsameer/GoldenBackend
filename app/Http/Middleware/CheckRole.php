@@ -3,12 +3,15 @@
 namespace App\Http\Middleware;
 
 use App\Models\LeaveRequest;
+use App\Modules\Hr\Services\ShiftAccessService;
 use Closure;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 
 class CheckRole
 {
+    public function __construct(private ShiftAccessService $shiftAccess) {}
+
     /**
      * Handle an incoming request.
      *
@@ -55,6 +58,26 @@ class CheckRole
                 return response()->json([
                     'error'      => $leaveMessage,
                     'error_code' => 'on_leave',
+                ], 403);
+            }
+        }
+
+        // Manager Shift Lock — a manager outside their shift (and outside any
+        // approved overtime window) loses access to every WORK route mid-
+        // session, not just selling. `:*` (wildcard) routes are exempt on
+        // purpose — that's exactly the self-service/"view my own data" +
+        // leave-request surface (hr/me/*, */mine, leaves, leaves/{id}/cancel)
+        // the manager must keep regardless of shift status. Every other
+        // group a manager can reach (stock, pricing, branch-operations,
+        // sales/cashier, hr admin review, …) declares specific roles, so it
+        // is a WORK route and gets locked here. Sales already has its own
+        // narrower lock (selling only, via SalesService::createInvoice())
+        // since selling is the only real action a sales employee has.
+        if (auth()->user()->role === 'manager' && ! in_array('*', $roles, true)) {
+            if ($shiftMessage = $this->shiftAccess->blockMessageFor(auth()->id())) {
+                return response()->json([
+                    'error'      => $shiftMessage,
+                    'error_code' => 'off_shift',
                 ], 403);
             }
         }

@@ -175,6 +175,28 @@ class PricingController extends Controller
         ]);
     }
 
+    /** POST /api/pricing/batches/bulk-price — admin only. Prices several
+     *  unpriced batches (any mix of products) in one request; each batch
+     *  keeps its own independently-submitted price — see
+     *  PricingService::bulkPriceBatches() for why this never applies one
+     *  shared price to everything. */
+    public function bulkPriceBatches(Request $request)
+    {
+        $data = $request->validate([
+            'items' => 'required|array|min:1',
+            'items.*.supply_item_id' => 'required|integer',
+            'items.*.selling_price' => 'required|numeric|min:0.01',
+            'items.*.reason' => 'nullable|string|max:255',
+        ]);
+
+        $results = $this->pricingService->bulkPriceBatches($data['items'], auth()->user());
+
+        return response()->json([
+            'message' => count(array_filter($results, fn ($r) => $r['success'])) . ' من ' . count($results) . ' دفعة تم تسعيرها بنجاح',
+            'data' => $results,
+        ]);
+    }
+
     /** PUT /api/pricing/{id}/selling-price — admin only. */
     public function updateSellingPrice(int $id, Request $request)
     {

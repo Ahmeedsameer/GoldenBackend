@@ -130,10 +130,13 @@ class ScheduleController extends Controller
     }
 
     /**
-     * GET /api/hr/schedule/bulk-assign/conflicts?employee_ids[]=&date=
+     * GET /api/hr/schedule/bulk-assign/conflicts?employee_ids[]=&date=&date_to=
      * Read-only preview so the modal can show "N موظفين لديهم شيفت مسجل
      * بالفعل" and let the admin/manager choose skip vs. replace BEFORE
-     * anything is written — never a silent overwrite.
+     * anything is written — never a silent overwrite. `date` is the range
+     * start (or the single day, if `date_to` is omitted — kept for backward
+     * compatibility with the original single-date form); `date_to` is the
+     * optional inclusive range end.
      */
     public function bulkAssignConflicts(Request $request)
     {
@@ -141,23 +144,28 @@ class ScheduleController extends Controller
             'employee_ids'   => ['required', 'array', 'min:1'],
             'employee_ids.*' => ['integer', 'exists:users,id'],
             'date'           => ['required', 'date'],
+            'date_to'        => ['nullable', 'date', 'after_or_equal:date'],
         ]);
 
         $this->assertManagerCanEditBulk($request, $data['employee_ids']);
 
-        $conflicts = $this->schedule->findExistingEntriesForDate($data['employee_ids'], $data['date']);
+        $conflicts = $this->schedule->findExistingEntriesForDate($data['employee_ids'], $data['date'], $data['date_to'] ?? null);
 
         return response()->json(['message' => 'ok', 'data' => ['conflicts' => $conflicts, 'count' => count($conflicts)]]);
     }
 
     /**
      * POST /api/hr/schedule/bulk-assign
-     * Body: { employee_ids: number[], shift_id: number, date: string, replace_existing?: bool }
-     * ONE endpoint for the whole operation — never one request per employee.
-     * Branch/authorization is re-verified here from the DB regardless of what
-     * the frontend already filtered by (see assertManagerCanEditBulk) — a
-     * tampered request naming an out-of-branch employee is rejected exactly
-     * like the existing bulkUpsert() endpoint already does.
+     * Body: { employee_ids: number[], shift_id: number, date: string, date_to?: string, replace_existing?: bool }
+     * ONE endpoint for the whole operation — never one request per employee
+     * per day. `date_to` is optional and defaults to `date` (a single-day
+     * assignment, the original behavior, still works unchanged) — when
+     * present, the shift is assigned to every day in the inclusive
+     * [date, date_to] range. Branch/authorization is re-verified here from
+     * the DB regardless of what the frontend already filtered by (see
+     * assertManagerCanEditBulk) — a tampered request naming an out-of-branch
+     * employee is rejected exactly like the existing bulkUpsert() endpoint
+     * already does.
      */
     public function bulkAssign(Request $request)
     {
@@ -166,6 +174,7 @@ class ScheduleController extends Controller
             'employee_ids.*'    => ['integer', 'exists:users,id'],
             'shift_id'          => ['required', 'integer', 'exists:shift_templates,id'],
             'date'              => ['required', 'date'],
+            'date_to'           => ['nullable', 'date', 'after_or_equal:date'],
             'replace_existing'  => ['nullable', 'boolean'],
         ]);
 
@@ -177,6 +186,7 @@ class ScheduleController extends Controller
             $template,
             $data['date'],
             (bool) ($data['replace_existing'] ?? false),
+            $data['date_to'] ?? null,
         );
 
         $msg = "تم تعيين الشيفت لـ {$result['assigned']} موظف";

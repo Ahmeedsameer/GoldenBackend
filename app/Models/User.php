@@ -68,7 +68,7 @@ class User extends Authenticatable implements JWTSubject
             'final_settlement_amount'     => 'decimal:2',
             'base_salary'                 => 'decimal:2',
             'personal_commission_percent' => 'decimal:2',
-            'monthly_leave_allowance'      => 'integer',
+            'monthly_leave_allowance'      => 'decimal:2',
         ];
     }
 

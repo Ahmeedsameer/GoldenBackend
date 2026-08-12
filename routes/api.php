@@ -389,6 +389,8 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::post('employees/{id}/end-employment/preview', [\App\Modules\Hr\Controllers\EmployeeController::class, 'previewEndEmployment']);
         Route::put('employees/{id}/end-employment',  [\App\Modules\Hr\Controllers\EmployeeController::class, 'endEmployment']);
         Route::get('employees/{id}/timeline',      [\App\Modules\Hr\Controllers\SelfServiceController::class, 'timelineFor']);
+        Route::get('employees/{id}/sales',         [\App\Modules\Hr\Controllers\SelfServiceController::class, 'salesFor']);
+        Route::get('employees/{id}/leave-balance', [\App\Modules\Hr\Controllers\LeaveController::class, 'balanceFor']);
 
         // Leave review (approve/reject) — admin only
         Route::put('leaves/{id}/approve', [\App\Modules\Hr\Controllers\LeaveController::class, 'approve']);
@@ -403,6 +405,11 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::post('penalties',        [\App\Modules\Hr\Controllers\BonusPenaltyController::class, 'penaltyStore']);
         Route::put('penalties/{id}',    [\App\Modules\Hr\Controllers\BonusPenaltyController::class, 'penaltyUpdate']);
         Route::delete('penalties/{id}', [\App\Modules\Hr\Controllers\BonusPenaltyController::class, 'penaltyDestroy']);
+
+        // Overtime — admin only (grant/cancel)
+        Route::get('overtime',          [\App\Modules\Hr\Controllers\OvertimeController::class, 'index']);
+        Route::post('overtime',         [\App\Modules\Hr\Controllers\OvertimeController::class, 'store']);
+        Route::delete('overtime/{id}',  [\App\Modules\Hr\Controllers\OvertimeController::class, 'destroy']);
 
         // Salary advances — review/approve/plan is admin only
         Route::put('advances/{id}/reject',      [\App\Modules\Hr\Controllers\SalaryAdvanceController::class, 'reject']);
@@ -430,6 +437,15 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         // Deduction settings (configurable)
         Route::get('deduction-settings',       [\App\Modules\Hr\Controllers\DeductionSettingController::class, 'index']);
         Route::put('deduction-settings/{id}',  [\App\Modules\Hr\Controllers\DeductionSettingController::class, 'update']);
+
+        // Admin-configurable leave/attendance reasons — admin only (create/edit)
+        Route::get('leave-reasons',       [\App\Modules\Hr\Controllers\LeaveReasonController::class, 'index']);
+        Route::post('leave-reasons',      [\App\Modules\Hr\Controllers\LeaveReasonController::class, 'store']);
+        Route::put('leave-reasons/{id}',  [\App\Modules\Hr\Controllers\LeaveReasonController::class, 'update']);
+
+        // Leave Encashment — admin only (grant)
+        Route::get('leave-cash-outs',  [\App\Modules\Hr\Controllers\LeaveCashOutController::class, 'index']);
+        Route::post('leave-cash-outs', [\App\Modules\Hr\Controllers\LeaveCashOutController::class, 'store']);
 
         // Payroll engine (generate / lock / unlock / paid) — admin only
         Route::post('payrolls/generate',    [\App\Modules\Hr\Controllers\PayrollController::class, 'generate']);
@@ -542,6 +558,7 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin'], 'prefix' => 
     Route::put('{id}/batches/{supplyItemId}/price', [PricingController::class, 'priceBatch']);
     Route::patch('{id}/batches/{supplyItemId}/price', [PricingController::class, 'updateBatchPrice']);
     Route::post('{id}/batches/{supplyItemId}/archive', [PricingController::class, 'archiveBatch']);
+    Route::post('batches/bulk-price', [PricingController::class, 'bulkPriceBatches']);
 });
 
 // ─── Customer Management ─────────────────────────────────────────────────────
@@ -856,6 +873,9 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin,manager'], 'pre
 Route::group(['middleware' => ['api', CheckRole::class . ':*'], 'prefix' => 'hr'], function () {
     Route::post('leaves',     [\App\Modules\Hr\Controllers\LeaveController::class, 'store']);
     Route::get('leaves/mine', [\App\Modules\Hr\Controllers\LeaveController::class, 'mine']);
+    // Active reasons for the leave-request form — name only, never the policy fields (Admin-only configuration).
+    Route::get('leave-reasons/active', [\App\Modules\Hr\Controllers\LeaveReasonController::class, 'active']);
+    Route::get('leave-cash-outs/mine', [\App\Modules\Hr\Controllers\LeaveCashOutController::class, 'mine']);
 
     // Personal HR dashboard summary (each employee sees only their own data)
     Route::get('me/summary',  [\App\Modules\Hr\Controllers\SelfServiceController::class, 'summary']);
@@ -870,6 +890,10 @@ Route::group(['middleware' => ['api', CheckRole::class . ':*'], 'prefix' => 'hr'
     Route::get('bonuses/mine',   [\App\Modules\Hr\Controllers\BonusPenaltyController::class, 'bonusMine']);
     Route::get('penalties/mine', [\App\Modules\Hr\Controllers\BonusPenaltyController::class, 'penaltyMine']);
     Route::get('me/timeline',    [\App\Modules\Hr\Controllers\SelfServiceController::class, 'timeline']);
+
+    // My Overtime (own rows only) + real-time shift status (OFF_SHIFT/WORKING/OVERTIME)
+    Route::get('overtime/mine',   [\App\Modules\Hr\Controllers\OvertimeController::class, 'mine']);
+    Route::get('me/shift-status', [\App\Modules\Hr\Controllers\OvertimeController::class, 'myShiftStatus']);
 
     // Leave self-service: cancel own PENDING request
     Route::put('leaves/{id}/cancel', [\App\Modules\Hr\Controllers\LeaveController::class, 'cancel']);
