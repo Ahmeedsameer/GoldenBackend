@@ -72,6 +72,9 @@ Route::group(['middleware' => 'api', 'prefix' => 'auth'], function () {
 
 Route::get('company-settings', [CompanySettingsController::class, 'show']);
 
+// ─── Public catalog (unauthenticated) — powers the marketing Landing Page ───────
+Route::get('public/catalog', [\App\Http\Controllers\PublicCatalogController::class, 'index']);
+
 
 // ─── Notifications (any authenticated user) ─────────────────────────────────────
 
@@ -254,6 +257,12 @@ Route::group(['middleware' => ['api', CheckRole::class . ':admin']], function ()
         Route::get('',       [TransactionReasonController::class, 'index']);
         Route::post('',      [TransactionReasonController::class, 'store']);
         Route::put('{id}',   [TransactionReasonController::class, 'update']);
+    });
+
+    // ── Social Channels (Landing Page — Facebook/Instagram/WhatsApp/TikTok/YouTube) ──
+    Route::group(['prefix' => 'social-channels'], function () {
+        Route::get('',      [\App\Http\Controllers\SocialChannelController::class, 'index']);
+        Route::put('{socialChannel}', [\App\Http\Controllers\SocialChannelController::class, 'update']);
     });
 
     // ── Safe Management (admin: create & toggle safes) ────────────────────────

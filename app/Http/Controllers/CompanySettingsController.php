@@ -4,19 +4,25 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\UpdateCompanySettingsRequest;
 use App\Models\CompanySetting;
+use App\Models\SocialChannel;
 use Illuminate\Support\Facades\Storage;
 
 class CompanySettingsController extends Controller
 {
     /**
-     * Public — no auth required. The login page and the app-init fetch both
-     * need company branding before a user is authenticated.
+     * Public — no auth required. The login page, the app-init fetch, and the
+     * Landing Page all need company branding + active social channels before
+     * a user is authenticated. Reuses this single endpoint rather than
+     * adding a second public route for social channels.
      */
     public function show()
     {
+        $company = CompanySetting::current();
+        $company->setAttribute('social_channels', SocialChannel::enabled()->get(['platform', 'label', 'value']));
+
         return response()->json([
             'message' => 'ok',
-            'data'    => CompanySetting::current(),
+            'data'    => $company,
         ]);
     }
 
